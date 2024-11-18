@@ -267,6 +267,7 @@ workflows:
     when:
       or:
         - equal: [ testnet3, << pipeline.git.branch >> ]
+        - equal: [ canary-test, << pipeline.git.tag >> ] 
     jobs:
       - build-and-publish-docker-arm
       - build-and-publish-docker-amd
