@@ -266,7 +266,6 @@ workflows:
   build-snarkos-docker-images:
     when:
       or:
-        - equal: [ testnet3, << pipeline.git.branch >> ]
         - equal: [ canary-test, << pipeline.git.tag >> ] 
     jobs:
       - build-and-publish-docker-arm
