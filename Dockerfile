@@ -1,4 +1,4 @@
-FROM ubuntu:22.04 AS builder
+FROM ubuntu:24.04 AS builder
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
@@ -6,9 +6,9 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     DEBIAN_FRONTEND=noninteractive
 
 RUN set -eux ; \
-    apt-get update -y && \
-    apt-get dist-upgrade -y && \
-    apt-get install -y --no-install-recommends \
+    apt update -y && \
+    apt dist-upgrade -o DPkg::Options::=--force-confold -y && \
+    apt install -o DPkg::Options::=--force-confold --no-install-recommends -y \
         ca-certificates \
         gcc \
         libc6-dev \
@@ -35,11 +35,7 @@ RUN set -eux ; \
     chmod -R a+w $RUSTUP_HOME $CARGO_HOME; \
     rustup --version; \
     cargo --version; \
-    rustc --version; \
-    apt-get remove -y --auto-remove wget && \
-    apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*;
+    rustc --version
 
 WORKDIR /usr/src/snarkOS
 
@@ -48,23 +44,26 @@ COPY . .
 RUN cargo build --release
 
 #---
-FROM ubuntu:22.04
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
 SHELL ["/bin/bash", "-c"]
 
 VOLUME ["/aleo/data"]
 
+COPY --from=builder /usr/src/snarkOS/entrypoint.sh /aleo/
+
 RUN set -ex && \
-    apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -o DPkg::Options::=--force-confold && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    ca-certificates && \
-    apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false && \
-    apt-get clean && \
+    apt update && \
+    apt dist-upgrade -o DPkg::Options::=--force-confold -y && \
+    apt install -o DPkg::Options::=--force-confold --no-install-recommends -y ca-certificates && \
+    apt purge --auto-remove -o APT::AutoRemove::RecommendsImportant=false -y && \
+    apt clean && \
     ln -s /aleo/data /root/.aleo && \
     rm -rf /var/lib/apt/lists/* && \
     mkdir -p /aleo/{bin,data}
 
 COPY --from=builder /usr/src/snarkOS/target/release/snarkos /aleo/bin/
-COPY --from=builder /usr/src/snarkOS/entrypoint.sh /aleo/
 
 CMD ["/aleo/entrypoint.sh"]
