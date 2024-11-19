@@ -240,6 +240,13 @@ jobs:
       - attach_workspace:
           at: my_workspace
       - run:
+          name: "Verify Mainnet Tag"
+          command: |
+            if [ "<< pipeline.git.tag >>" != "canary-test" ]; then
+              echo "Skipping manifest creation for non-mainnet tag: << pipeline.git.tag >>"
+              exit 0
+            fi
+      - run:
           name: "Pull ARM Docker image"
           command: |
             ARM_TAG=$(cat my_workspace/docker_tag_arm)
@@ -262,14 +269,14 @@ jobs:
             echo $CIRCLE_BRANCH
             echo $ARM_TAG
             echo $AMD_TAG
-            docker manifest create $DOCKER_REPO:${CIRCLE_BRANCH}-latest --amend $DOCKER_REPO:${ARM_TAG} --amend $DOCKER_REPO:${AMD_TAG}
-            docker manifest inspect $DOCKER_REPO:${CIRCLE_BRANCH}-latest
-            docker manifest push $DOCKER_REPO:${CIRCLE_BRANCH}-latest
-            echo "Pushed $DOCKER_REPO:${CIRCLE_BRANCH}-latest"
-            docker manifest create $DOCKER_REPO:latest --amend $DOCKER_REPO:${ARM_TAG} --amend $DOCKER_REPO:${AMD_TAG}
-            docker manifest inspect $DOCKER_REPO:latest
-            docker manifest push $DOCKER_REPO:latest
-            echo "Pushed $DOCKER_REPO:latest"
+            docker manifest create $DOCKER_REPO:${CIRCLE_BRANCH}-latest-test --amend $DOCKER_REPO:${ARM_TAG} --amend $DOCKER_REPO:${AMD_TAG}
+            docker manifest inspect $DOCKER_REPO:${CIRCLE_BRANCH}-latest-test
+            docker manifest push $DOCKER_REPO:${CIRCLE_BRANCH}-latest-test
+            echo "Pushed $DOCKER_REPO:${CIRCLE_BRANCH}-latest-test"
+            docker manifest create $DOCKER_REPO:latest-test --amend $DOCKER_REPO:${ARM_TAG} --amend $DOCKER_REPO:${AMD_TAG}
+            docker manifest inspect $DOCKER_REPO:latest-test
+            docker manifest push $DOCKER_REPO:latest-test
+            echo "Pushed $DOCKER_REPO:latest-test"
 
 workflows:
   main-workflow:
