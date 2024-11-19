@@ -148,7 +148,6 @@ jobs:
       - clear_environment:
           cache_key: snarkos-clippy-cache
 
-
   build-and-publish-docker-arm:
     machine:
       image: ubuntu-2204:current
@@ -162,20 +161,29 @@ jobs:
           no_output_timeout: 2h
           command: |
             VERSION=$(git rev-parse --short HEAD)
-            docker build -f Dockerfile -t $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-arm64 .
+            TAG=${CIRCLE_BRANCH:-$VERSION}
+            if [ -n "<< pipeline.git.tag >>" ]; then
+              TAG="<< pipeline.git.tag >>"
+            fi
+            docker build -f Dockerfile -t $DOCKER_REPO:$TAG-arm64 .
       - run:
           name: "Push snarkOS Docker image arm-v8"
           command: |
-            VERSION=$(git rev-parse --short HEAD)
+            TAG=${CIRCLE_BRANCH:-$VERSION}
+            if [ -n "<< pipeline.git.tag >>" ]; then
+              TAG="<< pipeline.git.tag >>"
+            fi
             echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
-            # CREATE THE SHELL FILE WITH IMAGE NAME AND TAG
-            docker push $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-arm64
-            echo "Pushed $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-arm64"
+            docker push $DOCKER_REPO:$TAG-arm64
+            echo "Pushed $DOCKER_REPO:$TAG-arm64"
       - run:
           name: "Save arm-v8 image tag"
           command: |
-            VERSION=$(git rev-parse --short HEAD)
-            echo "$CIRCLE_BRANCH-$VERSION-arm64" > my_workspace/docker_tag_arm
+            TAG=${CIRCLE_BRANCH:-$VERSION}
+            if [ -n "<< pipeline.git.tag >>" ]; then
+              TAG="<< pipeline.git.tag >>"
+            fi
+            echo "$TAG-arm64" > my_workspace/docker_tag_arm
       - persist_to_workspace:
           root: my_workspace
           paths:
@@ -194,19 +202,29 @@ jobs:
           no_output_timeout: 2h
           command: |
             VERSION=$(git rev-parse --short HEAD)
-            docker build -f Dockerfile -t $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-amd64 .
+            TAG=${CIRCLE_BRANCH:-$VERSION}
+            if [ -n "<< pipeline.git.tag >>" ]; then
+              TAG="<< pipeline.git.tag >>"
+            fi
+            docker build -f Dockerfile -t $DOCKER_REPO:$TAG-amd64 .
       - run:
           name: "Push snarkOS Docker image amd64"
           command: |
-            VERSION=$(git rev-parse --short HEAD)
+            TAG=${CIRCLE_BRANCH:-$VERSION}
+            if [ -n "<< pipeline.git.tag >>" ]; then
+              TAG="<< pipeline.git.tag >>"
+            fi
             echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
-            docker push $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-amd64
-            echo "Pushed $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-amd64"
+            docker push $DOCKER_REPO:$TAG-amd64
+            echo "Pushed $DOCKER_REPO:$TAG-amd64"
       - run:
           name: "Save amd64 image tag"
           command: |
-            VERSION=$(git rev-parse --short HEAD)
-            echo "$CIRCLE_BRANCH-$VERSION-amd64" > my_workspace/docker_tag_amd
+            TAG=${CIRCLE_BRANCH:-$VERSION}
+            if [ -n "<< pipeline.git.tag >>" ]; then
+              TAG="<< pipeline.git.tag >>"
+            fi
+            echo "$TAG-amd64" > my_workspace/docker_tag_amd
       - persist_to_workspace:
           root: my_workspace
           paths:
@@ -266,6 +284,7 @@ workflows:
   build-snarkos-docker-images:
     when:
       or:
+        - equal: [ canary-test, << pipeline.git.tag >> ] 
         - equal: [ canary, << pipeline.git.tag >> ] 
         - equal: [ testnet, << pipeline.git.tag >> ] 
         - equal: [ mainnet, << pipeline.git.tag >> ] 
