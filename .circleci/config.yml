@@ -102,7 +102,7 @@ jobs:
 
   # codecov:
   #   machine:
-  #     image: ubuntu-2404:current
+  #     image: ubuntu-2204:current
   #     docker_layer_caching: true
   #   resource_class: xlarge
   #   steps:
@@ -148,9 +148,10 @@ jobs:
       - clear_environment:
           cache_key: snarkos-clippy-cache
 
+
   build-and-publish-docker-arm:
     machine:
-      image: ubuntu-2404:current
+      image: ubuntu-2204:current
       docker_layer_caching: true
     resource_class: arm.2xlarge
     steps:
@@ -161,29 +162,20 @@ jobs:
           no_output_timeout: 2h
           command: |
             VERSION=$(git rev-parse --short HEAD)
-            TAG=${CIRCLE_BRANCH:-$VERSION}
-            if [ -n "<< pipeline.git.tag >>" ]; then
-              TAG="<< pipeline.git.tag >>"
-            fi
-            docker build -f Dockerfile -t $DOCKER_REPO:$TAG-arm64 .
+            docker build -f Dockerfile -t $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-arm64 .
       - run:
           name: "Push snarkOS Docker image arm-v8"
           command: |
-            TAG=${CIRCLE_BRANCH:-$VERSION}
-            if [ -n "<< pipeline.git.tag >>" ]; then
-              TAG="<< pipeline.git.tag >>"
-            fi
+            VERSION=$(git rev-parse --short HEAD)
             echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
-            docker push $DOCKER_REPO:$TAG-arm64
-            echo "Pushed $DOCKER_REPO:$TAG-arm64"
+            # CREATE THE SHELL FILE WITH IMAGE NAME AND TAG
+            docker push $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-arm64
+            echo "Pushed $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-arm64"
       - run:
           name: "Save arm-v8 image tag"
           command: |
-            TAG=${CIRCLE_BRANCH:-$VERSION}
-            if [ -n "<< pipeline.git.tag >>" ]; then
-              TAG="<< pipeline.git.tag >>"
-            fi
-            echo "$TAG-arm64" > my_workspace/docker_tag_arm
+            VERSION=$(git rev-parse --short HEAD)
+            echo "$CIRCLE_BRANCH-$VERSION-arm64" > my_workspace/docker_tag_arm
       - persist_to_workspace:
           root: my_workspace
           paths:
@@ -191,7 +183,7 @@ jobs:
 
   build-and-publish-docker-amd:
     machine:
-      image: ubuntu-2404:current
+      image: ubuntu-2204:current
       docker_layer_caching: true
     resource_class: 2xlarge
     steps:
@@ -202,29 +194,19 @@ jobs:
           no_output_timeout: 2h
           command: |
             VERSION=$(git rev-parse --short HEAD)
-            TAG=${CIRCLE_BRANCH:-$VERSION}
-            if [ -n "<< pipeline.git.tag >>" ]; then
-              TAG="<< pipeline.git.tag >>"
-            fi
-            docker build -f Dockerfile -t $DOCKER_REPO:$TAG-amd64 .
+            docker build -f Dockerfile -t $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-amd64 .
       - run:
           name: "Push snarkOS Docker image amd64"
           command: |
-            TAG=${CIRCLE_BRANCH:-$VERSION}
-            if [ -n "<< pipeline.git.tag >>" ]; then
-              TAG="<< pipeline.git.tag >>"
-            fi
+            VERSION=$(git rev-parse --short HEAD)
             echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
-            docker push $DOCKER_REPO:$TAG-amd64
-            echo "Pushed $DOCKER_REPO:$TAG-amd64"
+            docker push $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-amd64
+            echo "Pushed $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-amd64"
       - run:
           name: "Save amd64 image tag"
           command: |
-            TAG=${CIRCLE_BRANCH:-$VERSION}
-            if [ -n "<< pipeline.git.tag >>" ]; then
-              TAG="<< pipeline.git.tag >>"
-            fi
-            echo "$TAG-amd64" > my_workspace/docker_tag_amd
+            VERSION=$(git rev-parse --short HEAD)
+            echo "$CIRCLE_BRANCH-$VERSION-amd64" > my_workspace/docker_tag_amd
       - persist_to_workspace:
           root: my_workspace
           paths:
@@ -232,20 +214,13 @@ jobs:
 
   publish_snarkos_manifest:
     machine:
-      image: ubuntu-2404:current
+      image: ubuntu-2204:current
       docker_layer_caching: true
     resource_class: arm.2xlarge
     steps:
       - checkout
       - attach_workspace:
           at: my_workspace
-      - run:
-          name: "Verify Mainnet Tag"
-          command: |
-            if [ "<< pipeline.git.tag >>" != "canary-test" ]; then
-              echo "Skipping manifest creation for non-mainnet tag: << pipeline.git.tag >>"
-              exit 0
-            fi
       - run:
           name: "Pull ARM Docker image"
           command: |
@@ -277,7 +252,6 @@ jobs:
             docker manifest inspect $DOCKER_REPO:latest-test
             docker manifest push $DOCKER_REPO:latest-test
             echo "Pushed $DOCKER_REPO:latest-test"
-
 workflows:
   main-workflow:
     jobs:
