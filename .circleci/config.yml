@@ -163,14 +163,14 @@ jobs:
           command: |
             VERSION=$(git rev-parse --short HEAD)
             docker build -f Dockerfile -t $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-arm64 .
-      - run:
-          name: "Push snarkOS Docker image arm-v8"
-          command: |
-            VERSION=$(git rev-parse --short HEAD)
-            echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
-            # CREATE THE SHELL FILE WITH IMAGE NAME AND TAG
-            docker push $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-arm64
-            echo "Pushed $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-arm64"
+      # - run:
+      #     name: "Push snarkOS Docker image arm-v8"
+      #     command: |
+      #       VERSION=$(git rev-parse --short HEAD)
+      #       echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
+      #       # CREATE THE SHELL FILE WITH IMAGE NAME AND TAG
+      #       docker push $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-arm64
+      #       echo "Pushed $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-arm64"
       - run:
           name: "Save arm-v8 image tag"
           command: |
@@ -195,13 +195,13 @@ jobs:
           command: |
             VERSION=$(git rev-parse --short HEAD)
             docker build -f Dockerfile -t $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-amd64 .
-      - run:
-          name: "Push snarkOS Docker image amd64"
-          command: |
-            VERSION=$(git rev-parse --short HEAD)
-            echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
-            docker push $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-amd64
-            echo "Pushed $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-amd64"
+      # - run:
+      #     name: "Push snarkOS Docker image amd64"
+      #     command: |
+      #       VERSION=$(git rev-parse --short HEAD)
+      #       echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
+      #       docker push $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-amd64
+      #       echo "Pushed $DOCKER_REPO:$CIRCLE_BRANCH-$VERSION-amd64"
       - run:
           name: "Save amd64 image tag"
           command: |
