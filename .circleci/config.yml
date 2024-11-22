@@ -382,3 +382,4 @@ workflows:
               ignore: /.*/
             tags:
               only: /^canary-test|canary|testnet|mainnet$/
+              
