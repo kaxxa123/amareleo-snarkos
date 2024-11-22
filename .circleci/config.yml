@@ -152,7 +152,7 @@ jobs:
     machine:
       image: ubuntu-2404:current
       docker_layer_caching: true
-    resource_class: arm.2xlarge
+    resource_class: arm.xlarge
     steps:
       - checkout
       - run:
@@ -223,7 +223,7 @@ jobs:
     machine:
       image: ubuntu-2404:current
       docker_layer_caching: true
-    resource_class: 2xlarge
+    resource_class: xlarge
     steps:
       - checkout
       - run:
@@ -293,7 +293,7 @@ jobs:
     machine:
       image: ubuntu-2404:current
       docker_layer_caching: true
-    resource_class: arm.2xlarge
+    resource_class: arm.xlarge
     steps:
       - checkout
       - attach_workspace:
