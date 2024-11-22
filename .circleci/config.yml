@@ -24,7 +24,7 @@ commands:
             rm -rf "$CIRCLE_WORKING_DIRECTORY/.cargo/registry"
             DEBIAN_FRONTEND=noninteractive sudo apt-get update
             DEBIAN_FRONTEND=noninteractive sudo apt-get dist-upgrade -y -o DPkg::Options::=--force-confold
-            DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends clang llvm-dev llvm pkg-config xz-utils make libssl-dev libssl-dev
+            DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends clang llvm-dev llvm pkg-config xz-utils make libssl-dev libclang-dev cmake zlib1g-dev
       - restore_cache:
           keys:
             - << parameters.cache_key >>
@@ -72,7 +72,7 @@ jobs:
 
   environment:
     docker:
-      - image: cimg/rust:1.63
+      - image: cimg/rust:1.81.0 
     resource_class: xlarge
     parallelism: 1
     steps:
@@ -87,7 +87,7 @@ jobs:
 
   snarkos:
     docker:
-      - image: cimg/rust:1.63
+      - image: cimg/rust:1.81.0 
     resource_class: xlarge
     parallelism: 20
     steps:
@@ -118,7 +118,7 @@ jobs:
 
   fmt:
     docker:
-      - image: cimg/rust:1.63
+      - image: cimg/rust:1.81.0 
     resource_class: xlarge
     steps:
       - checkout
@@ -134,7 +134,7 @@ jobs:
 
   clippy:
     docker:
-      - image: cimg/rust:1.63
+      - image: cimg/rust:1.81.0 
     resource_class: xlarge
     steps:
       - checkout
@@ -155,6 +155,36 @@ jobs:
     resource_class: arm.2xlarge
     steps:
       - checkout
+      - run:
+          name: "Check out the branch and commit for the tag"
+          command: |
+            # Fetch all references, branches, and tags
+            git fetch --all --tags
+
+            # Get the commit hash for the tag
+            TAG_NAME="<< pipeline.git.tag >>"
+            COMMIT_HASH=$(git rev-list -n 1 $TAG_NAME)
+
+            if [ -z "$COMMIT_HASH" ]; then
+              echo "Could not determine the commit hash for tag $TAG_NAME" >&2
+              exit 1
+            fi
+
+            # Find the branch associated with the commit
+            BRANCH_NAME=$(git branch -r --contains $COMMIT_HASH | grep -oP '(?<=origin/)[^ ]+' | head -1)
+
+            if [ -z "$BRANCH_NAME" ]; then
+              echo "Could not determine the branch for commit $COMMIT_HASH" >&2
+              exit 1
+            fi
+
+
+            echo "Detected branch: $BRANCH_NAME"
+            echo "Detected commit: $COMMIT_HASH"
+
+            # Check out the branch and reset to the specific commit
+            git checkout $BRANCH_NAME
+            git reset --hard $COMMIT_HASH
       - run: mkdir -p my_workspace
       - run:
           name: "Build snarkOS Docker image arm-v8"
@@ -165,17 +195,17 @@ jobs:
             if [ -n "<< pipeline.git.tag >>" ]; then
               TAG="<< pipeline.git.tag >>"
             fi
-            docker build -f Dockerfile -t $DOCKER_REPO:$TAG-arm64 .
-      # - run:
-      #     name: "Push snarkOS Docker image arm-v8"
-      #     command: |
-      #       TAG=${CIRCLE_BRANCH:-$VERSION}
-      #       if [ -n "<< pipeline.git.tag >>" ]; then
-      #         TAG="<< pipeline.git.tag >>"
-      #       fi
-      #       echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
-      #       docker push $DOCKER_REPO:$TAG-arm64
-      #       echo "Pushed $DOCKER_REPO:$TAG-arm64"
+            docker build -f Dockerfile -t $DOCKER_REPO:$TAG-arm64-test .
+      - run:
+          name: "Push snarkOS Docker image arm-v8"
+          command: |
+            TAG=${CIRCLE_BRANCH:-$VERSION}
+            if [ -n "<< pipeline.git.tag >>" ]; then
+              TAG="<< pipeline.git.tag >>"
+            fi
+            echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
+            docker push $DOCKER_REPO:$TAG-arm64-test
+            echo "Pushed $DOCKER_REPO:$TAG-arm64-test"
       - run:
           name: "Save arm-v8 image tag"
           command: |
@@ -183,7 +213,7 @@ jobs:
             if [ -n "<< pipeline.git.tag >>" ]; then
               TAG="<< pipeline.git.tag >>"
             fi
-            echo "$TAG-arm64" > my_workspace/docker_tag_arm
+            echo "$TAG-arm64-test" > my_workspace/docker_tag_arm
       - persist_to_workspace:
           root: my_workspace
           paths:
@@ -196,6 +226,35 @@ jobs:
     resource_class: 2xlarge
     steps:
       - checkout
+      - run:
+          name: "Check out the branch and commit for the tag"
+          command: |
+            # Fetch all references, branches, and tags
+            git fetch --all --tags
+
+            # Get the commit hash for the tag
+            TAG_NAME="<< pipeline.git.tag >>"
+            COMMIT_HASH=$(git rev-list -n 1 $TAG_NAME)
+
+            if [ -z "$COMMIT_HASH" ]; then
+              echo "Could not determine the commit hash for tag $TAG_NAME" >&2
+              exit 1
+            fi
+
+            # Find the branch associated with the commit
+            BRANCH_NAME=$(git branch -r --contains $COMMIT_HASH | grep -oP '(?<=origin/)[^ ]+' | head -1)
+
+            if [ -z "$BRANCH_NAME" ]; then
+              echo "Could not determine the branch for commit $COMMIT_HASH" >&2
+              exit 1
+            fi
+
+            echo "Detected branch: $BRANCH_NAME"
+            echo "Detected commit: $COMMIT_HASH"
+
+            # Check out the branch and reset to the specific commit
+            git checkout $BRANCH_NAME
+            git reset --hard $COMMIT_HASH
       - run: mkdir -p my_workspace
       - run:
           name: "Build snarkOS Docker image amd64"
@@ -206,17 +265,17 @@ jobs:
             if [ -n "<< pipeline.git.tag >>" ]; then
               TAG="<< pipeline.git.tag >>"
             fi
-            docker build -f Dockerfile -t $DOCKER_REPO:$TAG-amd64 .
-      # - run:
-      #     name: "Push snarkOS Docker image amd64"
-      #     command: |
-      #       TAG=${CIRCLE_BRANCH:-$VERSION}
-      #       if [ -n "<< pipeline.git.tag >>" ]; then
-      #         TAG="<< pipeline.git.tag >>"
-      #       fi
-      #       echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
-      #       docker push $DOCKER_REPO:$TAG-amd64
-      #       echo "Pushed $DOCKER_REPO:$TAG-amd64"
+            docker build -f Dockerfile -t $DOCKER_REPO:$TAG-amd64-test .
+      - run:
+          name: "Push snarkOS Docker image amd64"
+          command: |
+            TAG=${CIRCLE_BRANCH:-$VERSION}
+            if [ -n "<< pipeline.git.tag >>" ]; then
+              TAG="<< pipeline.git.tag >>"
+            fi
+            echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
+            docker push $DOCKER_REPO:$TAG-amd64-test
+            echo "Pushed $DOCKER_REPO:$TAG-amd64-test"
       - run:
           name: "Save amd64 image tag"
           command: |
@@ -224,7 +283,7 @@ jobs:
             if [ -n "<< pipeline.git.tag >>" ]; then
               TAG="<< pipeline.git.tag >>"
             fi
-            echo "$TAG-amd64" > my_workspace/docker_tag_amd
+            echo "$TAG-amd64-test" > my_workspace/docker_tag_amd
       - persist_to_workspace:
           root: my_workspace
           paths:
@@ -251,14 +310,34 @@ jobs:
           command: |
             ARM_TAG=$(cat my_workspace/docker_tag_arm)
             echo $ARM_TAG
-            echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
-            docker pull $DOCKER_REPO:$ARM_TAG
+            # Log in to Docker Hub
+            if [ -z "$DOCKERHUB_TOKEN" ] || [ -z "$DOCKERHUB_USERNAME" ]; then
+              echo "Error: DOCKERHUB_TOKEN or DOCKERHUB_USERNAME not set" >&2
+              exit 1
+            fi
+
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+
+            # Pull Docker image
+            docker pull "$DOCKER_REPO:$ARM_TAG"
       - run:
           name: "Pull AMD Docker image"
           command: |
             AMD_TAG=$(cat my_workspace/docker_tag_amd)
             echo $AMD_TAG
-            docker pull $DOCKER_REPO:$AMD_TAG
+            # Log in to Docker Hub
+            if [ -z "$DOCKERHUB_TOKEN" ] || [ -z "$DOCKERHUB_USERNAME" ]; then
+              echo "Error: DOCKERHUB_TOKEN or DOCKERHUB_USERNAME not set" >&2
+              exit 1
+            fi
+
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+
+            # Pull Docker image
+            docker pull "$DOCKER_REPO:$ARM_TAG"
+
+            # Logout from Docker Hub to avoid storing credentials
+            docker logout
       - run:
           name: "Create and push Docker multi-arch manifests"
           command: |
@@ -271,31 +350,35 @@ jobs:
             echo $AMD_TAG
             docker manifest create $DOCKER_REPO:${CIRCLE_BRANCH}-latest-test --amend $DOCKER_REPO:${ARM_TAG} --amend $DOCKER_REPO:${AMD_TAG}
             docker manifest inspect $DOCKER_REPO:${CIRCLE_BRANCH}-latest-test
-            # docker manifest push $DOCKER_REPO:${CIRCLE_BRANCH}-latest-test
+            docker manifest push $DOCKER_REPO:${CIRCLE_BRANCH}-latest-test
             echo "Pushed $DOCKER_REPO:${CIRCLE_BRANCH}-latest-test"
             docker manifest create $DOCKER_REPO:latest-test --amend $DOCKER_REPO:${ARM_TAG} --amend $DOCKER_REPO:${AMD_TAG}
             docker manifest inspect $DOCKER_REPO:latest-test
-            # docker manifest push $DOCKER_REPO:latest-test
+            docker manifest push $DOCKER_REPO:latest-test
             echo "Pushed $DOCKER_REPO:latest-test"
 
 workflows:
-  main-workflow:
-    jobs:
-      - environment
-      - snarkos
-      # - codecov:
-      #     requires:
-      #       - rust-stable
-      - fmt
-      - clippy
   build-snarkos-docker-images:
-    triggers:
-      - tag:
-          only: /^canary-test|canary|testnet|mainnet$/
     jobs:
-      - build-and-publish-docker-arm
-      - build-and-publish-docker-amd
+      - build-and-publish-docker-arm:
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^canary-test|canary|testnet|mainnet$/
+      - build-and-publish-docker-amd:
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^canary-test|canary|testnet|mainnet$/
+
       - publish_snarkos_manifest:
           requires:
             - build-and-publish-docker-arm
             - build-and-publish-docker-amd
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^canary-test|canary|testnet|mainnet$/
