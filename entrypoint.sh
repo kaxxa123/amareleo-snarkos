@@ -8,7 +8,7 @@ fi
 
 # check if environment variables are set
 if [[ -z ${NETWORK+a} ]]; then
-  NETWORK="2"
+  NETWORK="1"
 fi
 
 # if no ip and port to bind were provided, bond to all on default port
