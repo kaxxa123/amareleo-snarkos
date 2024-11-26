@@ -43,7 +43,6 @@ commands:
           paths:
             - .cache/sccache
             - .cargo
-
   run_parallel:
     description: "Build and run tests (in parallel)"
     parameters:
@@ -62,14 +61,11 @@ commands:
             do
                 RUST_MIN_STACK=8388608 cargo test --features=<< parameters.features >> $i
             done
-
   install_rust_nightly:
     description: "Install Rust nightly toolchain"
     steps:
       - run: rustup toolchain install nightly-x86_64-unknown-linux-gnu
-
 jobs:
-
   environment:
     docker:
       - image: cimg/rust:1.81.0 
@@ -107,13 +103,13 @@ jobs:
   #   resource_class: xlarge
   #   steps:
   #     - attach_workspace:
-  #         at: /home/circleci/project/
+  #         at: 
   #     - run:
   #         name: Run kcov
   #         command: >
   #           cd ~/project/project/ &&
-  #           docker run --security-opt seccomp=unconfined -v ~/project/project/:/home/circleci/project/
-  #           howardwu/snarkos-codecov:2021-03-25 bash /home/circleci/project/ci/kcov.sh
+  #           docker run --security-opt seccomp=unconfined -v ~/project/project/:
+  #           howardwu/snarkos-codecov:2021-03-25 bash ci/kcov.sh
   #     - run: cd ./project/ && bash <(curl -s https://codecov.io/bash)
 
   fmt:
@@ -156,6 +152,9 @@ jobs:
     steps:
       - checkout
       - run:
+          name: "Ensure workspace directory exists"
+          command: mkdir -p my_workspace
+      - run:
           name: "Check out the branch and commit for the tag"
           command: |
             git fetch --all --tags
@@ -183,6 +182,15 @@ jobs:
             else
               docker push $DOCKER_REPO:$TAG-arm-test
             fi
+      - run:
+          name: "Save ARM tag to workspace"
+          command: |
+            TAG="<< pipeline.git.tag >>"
+            if [ "$TAG" == "mainnet" ]; then
+              echo "mainnet-arm-test" > my_workspace/docker_tag_arm
+            else
+              echo "$TAG-arm-test" > my_workspace/docker_tag_arm
+            fi
       - persist_to_workspace:
           root: my_workspace
           paths:
@@ -195,6 +203,9 @@ jobs:
     resource_class: xlarge
     steps:
       - checkout
+      - run:
+          name: "Ensure workspace directory exists"
+          command: mkdir -p my_workspace
       - run:
           name: "Check out the branch and commit for the tag"
           command: |
@@ -223,6 +234,15 @@ jobs:
             else
               docker push $DOCKER_REPO:$TAG-amd-test
             fi
+      - run:
+          name: "Save AMD tag to workspace"
+          command: |
+            TAG="<< pipeline.git.tag >>"
+            if [ "$TAG" == "mainnet" ]; then
+              echo "mainnet-amd-test" > my_workspace/docker_tag_amd
+            else
+              echo "$TAG-amd-test" > my_workspace/docker_tag_amd
+            fi
       - persist_to_workspace:
           root: my_workspace
           paths:
@@ -244,23 +264,17 @@ jobs:
             ARM_TAG=$(cat my_workspace/docker_tag_arm)
             AMD_TAG=$(cat my_workspace/docker_tag_amd)
             echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
-            if [ "$TAG" == "mainnet" ]; then
-              docker manifest create $DOCKER_REPO:mainnet-test --amend $DOCKER_REPO:mainnet-arm-test --amend $DOCKER_REPO:mainnet-amd-test
+            if [ "$TAG" == "canary-test" ]; then
+              docker manifest create $DOCKER_REPO:mainnet-test --amend $DOCKER_REPO:$ARM_TAG --amend $DOCKER_REPO:$AMD_TAG
               docker manifest push $DOCKER_REPO:mainnet-test
-              docker manifest create $DOCKER_REPO:latest-test --amend $DOCKER_REPO:latest-arm-test --amend $DOCKER_REPO:latest-amd-test
+              docker manifest create $DOCKER_REPO:latest-test --amend $DOCKER_REPO:$ARM_TAG --amend $DOCKER_REPO:$AMD_TAG
               docker manifest push $DOCKER_REPO:latest-test
             else
-              docker manifest create $DOCKER_REPO:$TAG-test --amend $DOCKER_REPO:$TAG-arm-test --amend $DOCKER_REPO:$TAG-amd-test
+              docker manifest create $DOCKER_REPO:$TAG-test --amend $DOCKER_REPO:$ARM_TAG --amend $DOCKER_REPO:$AMD_TAG
               docker manifest push $DOCKER_REPO:$TAG-test
             fi
 
 workflows:
-  main-workflow:
-    jobs:
-      - environment
-      - snarkos
-      # - fmt
-      # - clippy
   build-snarkos-docker-images:
     jobs:
       - build-and-publish-docker-arm:
