@@ -1,68 +1,14 @@
 version: 2.1
-
-parameters:
-  medium:
-    type: string
-    default: medium
-  large:
-    type: string
-    default: large
-  xlarge:
-    type: string
-    default: xlarge
-  twoxlarge:
-    type: string
-    default: aleonet/2xlarge
-
-orbs:
-  windows: circleci/windows@5.0
-
 commands:
-  check_windows:
-    description: "Runs cargo check on Windows"
-    parameters:
-      workspace_member:
-        type: string
-    steps:
-      - checkout
-      - restore_cache:
-          key: cargo-cache-{{ arch }}-{{ checksum "Cargo.lock" }}
-      - run:
-          name: "Install Rust and run cargo check"
-          command: |
-            $ProgressPreference = "SilentlyContinue"
-            # Remove the circleci installed rustc.
-            choco uninstall rust
-            # Install llvm (libclang for rocksdb).
-            choco install llvm -y 
-            refreshenv
-            # Install rust with rustup.
-            Invoke-WebRequest -Uri "https://win.rustup.rs/" -OutFile "C:\rustup-init.exe"
-            & C:\rustup-init.exe -y --default-toolchain "stable-x86_64-pc-windows-msvc" --no-modify-path --profile minimal
-            $Env:Path += ";$Env:USERPROFILE\.cargo\bin"
-            # Verify the installation.
-            cargo --version --verbose
-            rustc --version | Out-File -FilePath "rust-version"
-            if (!(Test-Path "Cargo.lock" -PathType Leaf)) {
-                cargo generate-lockfile
-            }
-            cd << parameters.workspace_member >>
-            cargo check --examples --benches --tests
-      - save_cache:
-          paths:
-            - C:\Users\circleci\.cargo\registry
-            - C:\Users\circleci\.cargo\git
-            - target
-          key: cargo-cache-{{ arch }}-{{ checksum "rust-version" }}-{{ checksum "Cargo.lock" }}
-
   setup_environment:
     description: "Setup testing environment"
     parameters:
       cache_key:
         type: string
-        default: v3.0.0-rust-1.81.0-snarkos-stable-cache
+        default: snarkos-stable-cache
     steps:
       - run: set -e
+      - setup_remote_docker
       - run:
           name: Prepare environment and install dependencies
           command: |
@@ -78,7 +24,7 @@ commands:
             rm -rf "$CIRCLE_WORKING_DIRECTORY/.cargo/registry"
             DEBIAN_FRONTEND=noninteractive sudo apt-get update
             DEBIAN_FRONTEND=noninteractive sudo apt-get dist-upgrade -y -o DPkg::Options::=--force-confold
-            DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends clang llvm-dev llvm pkg-config xz-utils make libssl-dev libssl-dev
+            DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends clang llvm-dev llvm pkg-config xz-utils make libssl-dev libclang-dev cmake zlib1g-dev
       - restore_cache:
           keys:
             - << parameters.cache_key >>
@@ -88,7 +34,7 @@ commands:
     parameters:
       cache_key:
         type: string
-        default: v3.0.0-rust-1.81.0-snarkos-stable-cache
+        default: snarkos-stable-cache
     steps:
       - run: (sccache -s||true)
       - run: set +e
@@ -97,343 +43,252 @@ commands:
           paths:
             - .cache/sccache
             - .cargo
-
-  run_serial:
-    description: "Build and run tests"
-    parameters:
-      workspace_member:
-        type: string
-      cache_key:
-        type: string
-      flags:
-        type: string
-        default: ""
-    steps:
-      - checkout
-      - setup_environment:
-          cache_key: << parameters.cache_key >>
-      - run:
-          no_output_timeout: 30m
-          command: cd << parameters.workspace_member >> && RUST_MIN_STACK=67108864 cargo test << parameters.flags >>
-      - clear_environment:
-          cache_key: << parameters.cache_key >>
-
-  run_serial_long:
-    description: "Build and run long running tests"
-    parameters:
-      workspace_member:
-        type: string
-      cache_key:
-        type: string
-      flags:
-        type: string
-        default: ""
-    steps:
-      - checkout
-      - setup_environment:
-          cache_key: << parameters.cache_key >>
-      - run:
-          no_output_timeout: 300m
-          command: cd << parameters.workspace_member >> && RUST_MIN_STACK=67108864 cargo test << parameters.flags >>
-      - clear_environment:
-          cache_key: << parameters.cache_key >>
-
   run_parallel:
     description: "Build and run tests (in parallel)"
     parameters:
       workspace_member:
         type: string
-      cache_key:
+      features:
         type: string
-      flags:
-        type: string
-        default: ""
     steps:
-      - checkout
-      - setup_environment:
-          cache_key: << parameters.cache_key >>
       - run:
-          no_output_timeout: 45m
+          no_output_timeout: 30m
           command: |
             cd << parameters.workspace_member >>
-            cargo test -- --list --format terse | sed 's/: test//' > test_names.txt
+            cargo test --features=<< parameters.features >> -- --list --format terse | sed 's/: test//' > test_names.txt
             TEST_NAMES=$(circleci tests split test_names.txt)
             for i in $(echo $TEST_NAMES | sed "s/ / /g")
             do
-                RUST_MIN_STACK=67108864 cargo test $i << parameters.flags >>
+                RUST_MIN_STACK=8388608 cargo test --features=<< parameters.features >> $i
             done
-      - clear_environment:
-          cache_key: << parameters.cache_key >>
-
   install_rust_nightly:
     description: "Install Rust nightly toolchain"
     steps:
       - run: rustup toolchain install nightly-x86_64-unknown-linux-gnu
-
 jobs:
-  integration:
+  environment:
     docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
+      - image: cimg/rust:1.81.0 
+    resource_class: xlarge
+    parallelism: 1
     steps:
-      - run_serial_long:
-          workspace_member: .integration
-          cache_key: v3.0.0-rust-1.81.0-integration-cache
+      - checkout
+      - setup_environment:
+          cache_key: snarkos-environment-cache
+      - run_parallel:
+          workspace_member: environment
+          features: ""
+      - clear_environment:
+          cache_key: snarkos-environment-cache
 
   snarkos:
     docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.large >>
+      - image: cimg/rust:1.81.0 
+    resource_class: xlarge
+    parallelism: 20
     steps:
-      - run_serial:
+      - checkout
+      - setup_environment:
+          cache_key: snarkos-stable-cache
+      - run_parallel:
           workspace_member: .
-          cache_key: v3.0.0-rust-1.81.0-stable-cache
+          features: ""
+      - clear_environment:
+          cache_key: snarkos-stable-cache
 
-  account:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
-    steps:
-      - run_serial:
-          workspace_member: account
-          cache_key: v3.0.0-rust-1.81.0-account-cache
+  # codecov:
+  #   machine:
+  #     image: ubuntu-2404:current
+  #     docker_layer_caching: true
+  #   resource_class: xlarge
+  #   steps:
+  #     - attach_workspace:
+  #         at: 
+  #     - run:
+  #         name: Run kcov
+  #         command: >
+  #           cd ~/project/project/ &&
+  #           docker run --security-opt seccomp=unconfined -v ~/project/project/:
+  #           howardwu/snarkos-codecov:2021-03-25 bash ci/kcov.sh
+  #     - run: cd ./project/ && bash <(curl -s https://codecov.io/bash)
 
-  cli:
+  fmt:
     docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.xlarge >>
-    steps:
-      - run_serial:
-          workspace_member: cli
-          cache_key: v3.0.0-rust-1.81.0-cli-cache
-
-  display:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
-    steps:
-      - run_serial:
-          workspace_member: display
-          cache_key: v3.0.0-rust-1.81.0-display-cache
-
-  node:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.twoxlarge >>
-    steps:
-      - run_serial:
-          workspace_member: node
-          cache_key: v3.0.0-rust-1.81.0-node-cache
-
-  node-bft:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.twoxlarge >>
-    steps:
-      - run_serial:
-          workspace_member: node/bft
-          cache_key: v3.0.0-rust-1.81.0-node-bft-cache
-
-  node-bft-events:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
-    steps:
-      - run_serial:
-          workspace_member: node/bft/events
-          cache_key: v3.0.0-rust-1.81.0-node-bft-events-cache
-
-  node-bft-ledger-service:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
-    steps:
-      - run_serial:
-          workspace_member: node/bft/ledger-service
-          cache_key: v3.0.0-rust-1.81.0-node-bft-ledger-service-cache
-
-  node-bft-storage-service:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
-    steps:
-      - run_serial:
-          workspace_member: node/bft/storage-service
-          cache_key: v3.0.0-rust-1.81.0-node-bft-storage-service-cache
-
-  node-cdn:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
-    steps:
-      - run_serial:
-          workspace_member: node/cdn
-          cache_key: v3.0.0-rust-1.81.0-node-cdn-cache
-
-  node-consensus:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
-    steps:
-      - run_serial:
-          workspace_member: node/consensus
-          cache_key: v3.0.0-rust-1.81.0-node-consensus-cache
-
-  node-rest:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
-    steps:
-      - run_serial:
-          workspace_member: node/rest
-          cache_key: v3.0.0-rust-1.81.0-node-rest-cache
-
-  node-router:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.large >>
-    steps:
-      - run_serial:
-          workspace_member: node/router
-          cache_key: v3.0.0-rust-1.81.0-node-router-cache
-
-  node-router-messages:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
-    steps:
-      - run_serial:
-          workspace_member: node/router/messages
-          cache_key: v3.0.0-rust-1.81.0-node-router-messages-cache
-
-  node-sync:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.xlarge >>
-    steps:
-      - run_serial:
-          workspace_member: node/sync
-          cache_key: v3.0.0-rust-1.81.0-node-sync-cache
-
-  node-sync-communication-service:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
-    steps:
-      - run_serial:
-          workspace_member: node/sync/communication-service
-          cache_key: v3.0.0-rust-1.81.0-node-sync-communication-service-cache
-
-  node-sync-locators:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
-    steps:
-      - run_serial:
-          workspace_member: node/sync/locators
-          cache_key: v3.0.0-rust-1.81.0-node-sync-locators-cache
-
-  node-tcp:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
-    steps:
-      - run_serial:
-          workspace_member: node/tcp
-          cache_key: v3.0.0-rust-1.81.0-node-tcp-cache
-
-  check-fmt:
-    docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
+      - image: cimg/rust:1.81.0 
+    resource_class: xlarge
     steps:
       - checkout
       - install_rust_nightly
       - setup_environment:
-          cache_key: v3.0.0-rust-1.81.0-fmt-cache
+          cache_key: snarkos-fmt-cache
       - run:
           name: Check style
           no_output_timeout: 35m
           command: cargo +nightly fmt --all -- --check
       - clear_environment:
-          cache_key: v3.0.0-rust-1.81.0-fmt-cache
+          cache_key: snarkos-fmt-cache
 
-  check-clippy:
+  clippy:
     docker:
-      - image: cimg/rust:1.81.0 # Attention - Change the MSRV in Cargo.toml and rust-toolchain as well
-    resource_class: << pipeline.parameters.medium >>
+      - image: cimg/rust:1.81.0 
+    resource_class: xlarge
     steps:
       - checkout
+      - install_rust_nightly
       - setup_environment:
-          cache_key: v3.0.0-rust-1.81.0-clippy-cache
+          cache_key: snarkos-clippy-cache
       - run:
-          name: Check lint
+          name: Check style
           no_output_timeout: 35m
-          command: |
-            cargo clippy --workspace --all-targets -- -D warnings
-            cargo clippy --workspace --all-targets --all-features -- -D warnings
+          command: cargo +nightly clippy --workspace --all-targets
       - clear_environment:
-          cache_key: v3.0.0-rust-1.81.0-clippy-cache
+          cache_key: snarkos-clippy-cache
 
-  verify-windows:
-    executor:
-      name: windows/default
-      size: xlarge
-    environment:
-      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-    parameters:
-      workspace_member:
-        type: string
+  build-and-publish-docker-arm:
+    machine:
+      image: ubuntu-2404:current
+      docker_layer_caching: true
+    resource_class: arm.xlarge
     steps:
-      - check_windows:
-          workspace_member: << parameters.workspace_member >>
+      - checkout
+      - run:
+          name: "Ensure workspace directory exists"
+          command: mkdir -p my_workspace
+      - run:
+          name: "Check out the branch and commit for the tag"
+          command: |
+            git fetch --all --tags
+            TAG_NAME="<< pipeline.git.tag >>"
+            COMMIT_HASH=$(git rev-list -n 1 $TAG_NAME)
+            git checkout $COMMIT_HASH
+      - run:
+          name: "Build snarkOS Docker image arm64"
+          command: |
+            TAG="<< pipeline.git.tag >>"
+            if [ "$TAG" == "mainnet" ]; then
+              docker build -f Dockerfile -t $DOCKER_REPO:mainnet-arm-test .
+              docker build -f Dockerfile -t $DOCKER_REPO:latest-arm-test .
+            else
+              docker build -f Dockerfile -t $DOCKER_REPO:$TAG-arm-test .
+            fi
+      - run:
+          name: "Push snarkOS Docker image arm64"
+          command: |
+            TAG="<< pipeline.git.tag >>"
+            echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
+            if [ "$TAG" == "mainnet" ]; then
+              docker push $DOCKER_REPO:mainnet-arm-test
+              docker push $DOCKER_REPO:latest-arm-test
+            else
+              docker push $DOCKER_REPO:$TAG-arm-test
+            fi
+      - run:
+          name: "Save ARM tag to workspace"
+          command: |
+            TAG="<< pipeline.git.tag >>"
+            if [ "$TAG" == "mainnet" ]; then
+              echo "mainnet-arm-test" > my_workspace/docker_tag_arm
+            else
+              echo "$TAG-arm-test" > my_workspace/docker_tag_arm
+            fi
+      - persist_to_workspace:
+          root: my_workspace
+          paths:
+            - docker_tag_arm
+
+  build-and-publish-docker-amd:
+    machine:
+      image: ubuntu-2404:current
+      docker_layer_caching: true
+    resource_class: xlarge
+    steps:
+      - checkout
+      - run:
+          name: "Ensure workspace directory exists"
+          command: mkdir -p my_workspace
+      - run:
+          name: "Check out the branch and commit for the tag"
+          command: |
+            git fetch --all --tags
+            TAG_NAME="<< pipeline.git.tag >>"
+            COMMIT_HASH=$(git rev-list -n 1 $TAG_NAME)
+            git checkout $COMMIT_HASH
+      - run:
+          name: "Build snarkOS Docker image amd64"
+          command: |
+            TAG="<< pipeline.git.tag >>"
+            if [ "$TAG" == "mainnet" ]; then
+              docker build -f Dockerfile -t $DOCKER_REPO:mainnet-amd-test .
+              docker build -f Dockerfile -t $DOCKER_REPO:latest-amd-test .
+            else
+              docker build -f Dockerfile -t $DOCKER_REPO:$TAG-amd-test .
+            fi
+      - run:
+          name: "Push snarkOS Docker image amd64"
+          command: |
+            TAG="<< pipeline.git.tag >>"
+            echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
+            if [ "$TAG" == "mainnet" ]; then
+              docker push $DOCKER_REPO:mainnet-amd-test
+              docker push $DOCKER_REPO:latest-amd-test
+            else
+              docker push $DOCKER_REPO:$TAG-amd-test
+            fi
+      - run:
+          name: "Save AMD tag to workspace"
+          command: |
+            TAG="<< pipeline.git.tag >>"
+            if [ "$TAG" == "mainnet" ]; then
+              echo "mainnet-amd-test" > my_workspace/docker_tag_amd
+            else
+              echo "$TAG-amd-test" > my_workspace/docker_tag_amd
+            fi
+      - persist_to_workspace:
+          root: my_workspace
+          paths:
+            - docker_tag_amd
+
+  publish_snarkos_manifest:
+    machine:
+      image: ubuntu-2404:current
+      docker_layer_caching: true
+    resource_class: arm.xlarge
+    steps:
+      - checkout
+      - attach_workspace:
+          at: my_workspace
+      - run:
+          name: "Create and push Docker multi-arch manifests"
+          command: |
+            TAG="<< pipeline.git.tag >>"
+            ARM_TAG=$(cat my_workspace/docker_tag_arm)
+            AMD_TAG=$(cat my_workspace/docker_tag_amd)
+            echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
+            if [ "$TAG" == "canary-test" ]; then
+              docker manifest create $DOCKER_REPO:mainnet-test --amend $DOCKER_REPO:$ARM_TAG --amend $DOCKER_REPO:$AMD_TAG
+              docker manifest push $DOCKER_REPO:mainnet-test
+              docker manifest create $DOCKER_REPO:latest-test --amend $DOCKER_REPO:$ARM_TAG --amend $DOCKER_REPO:$AMD_TAG
+              docker manifest push $DOCKER_REPO:latest-test
+            else
+              docker manifest create $DOCKER_REPO:$TAG-test --amend $DOCKER_REPO:$ARM_TAG --amend $DOCKER_REPO:$AMD_TAG
+              docker manifest push $DOCKER_REPO:$TAG-test
+            fi
 
 workflows:
-  version: 2
-
-  main-workflow:
+  build-snarkos-docker-images:
     jobs:
-      - snarkos
-      - account
-      - cli
-      - display
-      - node
-      - node-bft
-      - node-bft-events
-      - node-bft-ledger-service
-      - node-bft-storage-service
-      - node-cdn
-      - node-consensus
-      - node-rest
-      - node-router
-      - node-router-messages
-      - node-sync
-      - node-sync-communication-service
-      - node-sync-locators
-      - node-tcp
-      - check-fmt
-      - check-clippy
-
-  windows-workflow:
-    jobs:
-      - verify-windows:
-          matrix:
-            parameters:
-              workspace_member: [
-                account,
-                cli,
-                display,
-                node
-              ]
-
-  scheduled-workflow:
-    triggers:
-      - schedule:
-          cron: "0 0,12 * * *"
+      - build-and-publish-docker-arm:
           filters:
-            branches:
-              only:
-                - mainnet
-    jobs:
-      - integration
-      
+            tags:
+              only: /^canary-test|canary|testnet|mainnet$/
+      - build-and-publish-docker-amd:
+          filters:
+            tags:
+              only: /^canary-test|canary|testnet|mainnet$/
+      - publish_snarkos_manifest:
+          requires:
+            - build-and-publish-docker-arm
+            - build-and-publish-docker-amd
+          filters:
+            tags:
+              only: /^canary-test|canary|testnet|mainnet$/
