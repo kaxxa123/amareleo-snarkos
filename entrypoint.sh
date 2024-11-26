@@ -1,0 +1,63 @@
+#!/bin/bash
+# running the Aleo snarkOS in a container
+
+# check if environment variables are set
+if [[ -z ${RUST_LOG+a} ]]; then
+  RUST_LOG=debug
+fi
+
+# check if environment variables are set
+if [[ -z ${NETWORK+a} ]]; then
+  NETWORK="0"
+fi
+
+# if no ip and port to bind were provided, bond to all on default port
+if [[ -z ${SNARKOS_PORT+a} ]]; then
+  SNARKOS_PORT="0.0.0.0:4130"
+fi
+
+# if no rest api port was provided
+if [[ -z ${RPC_PORT+a} ]]; then
+  RPC_PORT="0.0.0.0:3030"
+fi
+
+# if no log level was provided, use the default
+if [[ -z ${LOGLEVEL+a} ]]; then
+  LOGLEVEL="4"
+fi
+
+# if no function was provided
+if [[ -z ${FUNC+a} ]]; then
+  FUNC="client"
+fi
+
+# if no Aleo address was provided
+if [[ -z ${ALEO_PRIVKEY+a} ]]; then
+  ALEO_PRIVKEY="$(/aleo/bin/snarkos account new | grep APrivateKey1 | awk '{ print $3; }')"
+fi
+
+# if peers were not provided
+if [[ -z ${PEERS+a} ]]; then
+  COMMON_PARAMS=" --nocdn --nodisplay --logfile /dev/null --node ${SNARKOS_PORT} --rest ${RPC_PORT} --verbosity ${LOGLEVEL} --network ${NETWORK} --private-key ${ALEO_PRIVKEY}"
+else
+  COMMON_PARAMS=" --nocdn --nodisplay --logfile /dev/null --node ${SNARKOS_PORT} --rest ${RPC_PORT} --verbosity ${LOGLEVEL} --network ${NETWORK} --private-key ${ALEO_PRIVKEY} --peers ${PEERS}"
+fi
+
+case ${FUNC} in
+
+  validator)
+    /aleo/bin/snarkos start --bft ${BFT_PORT} --validators ${VALIDATORS} --validator ${COMMON_PARAMS} --metrics
+    ;;
+
+  prover)
+    /aleo/bin/snarkos start --allow-external-peers --prover ${COMMON_PARAMS}
+    ;;
+
+  client)
+    /aleo/bin/snarkos start --allow-external-peers --client ${COMMON_PARAMS}
+    ;;
+
+  *)
+    /aleo/bin/snarkos start --allow-external-peers --client ${COMMON_PARAMS}
+    ;;
+esac
