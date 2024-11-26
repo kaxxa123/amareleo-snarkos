@@ -166,10 +166,10 @@ jobs:
           command: |
             TAG="<< pipeline.git.tag >>"
             if [ "$TAG" == "mainnet" ]; then
-              docker build -f Dockerfile -t $DOCKER_REPO:mainnet-arm-test .
-              docker build -f Dockerfile -t $DOCKER_REPO:latest-arm-test .
+              docker build -f Dockerfile -t $DOCKER_REPO:mainnet-arm .
+              docker build -f Dockerfile -t $DOCKER_REPO:latest-arm .
             else
-              docker build -f Dockerfile -t $DOCKER_REPO:$TAG-arm-test .
+              docker build -f Dockerfile -t $DOCKER_REPO:$TAG-arm .
             fi
       - run:
           name: "Push snarkOS Docker image arm64"
@@ -177,19 +177,19 @@ jobs:
             TAG="<< pipeline.git.tag >>"
             echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
             if [ "$TAG" == "mainnet" ]; then
-              docker push $DOCKER_REPO:mainnet-arm-test
-              docker push $DOCKER_REPO:latest-arm-test
+              docker push $DOCKER_REPO:mainnet-arm
+              docker push $DOCKER_REPO:latest-arm
             else
-              docker push $DOCKER_REPO:$TAG-arm-test
+              docker push $DOCKER_REPO:$TAG-arm
             fi
       - run:
           name: "Save ARM tag to workspace"
           command: |
             TAG="<< pipeline.git.tag >>"
             if [ "$TAG" == "mainnet" ]; then
-              echo "mainnet-arm-test" > my_workspace/docker_tag_arm
+              echo "mainnet-arm" > my_workspace/docker_tag_arm
             else
-              echo "$TAG-arm-test" > my_workspace/docker_tag_arm
+              echo "$TAG-arm" > my_workspace/docker_tag_arm
             fi
       - persist_to_workspace:
           root: my_workspace
@@ -218,10 +218,10 @@ jobs:
           command: |
             TAG="<< pipeline.git.tag >>"
             if [ "$TAG" == "mainnet" ]; then
-              docker build -f Dockerfile -t $DOCKER_REPO:mainnet-amd-test .
-              docker build -f Dockerfile -t $DOCKER_REPO:latest-amd-test .
+              docker build -f Dockerfile -t $DOCKER_REPO:mainnet-amd .
+              docker build -f Dockerfile -t $DOCKER_REPO:latest-amd .
             else
-              docker build -f Dockerfile -t $DOCKER_REPO:$TAG-amd-test .
+              docker build -f Dockerfile -t $DOCKER_REPO:$TAG-amd .
             fi
       - run:
           name: "Push snarkOS Docker image amd64"
@@ -229,19 +229,19 @@ jobs:
             TAG="<< pipeline.git.tag >>"
             echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
             if [ "$TAG" == "mainnet" ]; then
-              docker push $DOCKER_REPO:mainnet-amd-test
-              docker push $DOCKER_REPO:latest-amd-test
+              docker push $DOCKER_REPO:mainnet-amd
+              docker push $DOCKER_REPO:latest-amd
             else
-              docker push $DOCKER_REPO:$TAG-amd-test
+              docker push $DOCKER_REPO:$TAG-amd
             fi
       - run:
           name: "Save AMD tag to workspace"
           command: |
             TAG="<< pipeline.git.tag >>"
             if [ "$TAG" == "mainnet" ]; then
-              echo "mainnet-amd-test" > my_workspace/docker_tag_amd
+              echo "mainnet-amd" > my_workspace/docker_tag_amd
             else
-              echo "$TAG-amd-test" > my_workspace/docker_tag_amd
+              echo "$TAG-amd" > my_workspace/docker_tag_amd
             fi
       - persist_to_workspace:
           root: my_workspace
@@ -264,14 +264,14 @@ jobs:
             ARM_TAG=$(cat my_workspace/docker_tag_arm)
             AMD_TAG=$(cat my_workspace/docker_tag_amd)
             echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USERNAME --password-stdin
-            if [ "$TAG" == "canary-test" ]; then
-              docker manifest create $DOCKER_REPO:mainnet-test --amend $DOCKER_REPO:$ARM_TAG --amend $DOCKER_REPO:$AMD_TAG
-              docker manifest push $DOCKER_REPO:mainnet-test
-              docker manifest create $DOCKER_REPO:latest-test --amend $DOCKER_REPO:$ARM_TAG --amend $DOCKER_REPO:$AMD_TAG
-              docker manifest push $DOCKER_REPO:latest-test
+            if [ "$TAG" == "mainnet" ]; then
+              docker manifest create $DOCKER_REPO:mainnet --amend $DOCKER_REPO:$ARM_TAG --amend $DOCKER_REPO:$AMD_TAG
+              docker manifest push $DOCKER_REPO:mainnet
+              docker manifest create $DOCKER_REPO:latest --amend $DOCKER_REPO:$ARM_TAG --amend $DOCKER_REPO:$AMD_TAG
+              docker manifest push $DOCKER_REPO:latest
             else
-              docker manifest create $DOCKER_REPO:$TAG-test --amend $DOCKER_REPO:$ARM_TAG --amend $DOCKER_REPO:$AMD_TAG
-              docker manifest push $DOCKER_REPO:$TAG-test
+              docker manifest create $DOCKER_REPO:$TAG --amend $DOCKER_REPO:$ARM_TAG --amend $DOCKER_REPO:$AMD_TAG
+              docker manifest push $DOCKER_REPO:$TAG
             fi
 
 workflows:
