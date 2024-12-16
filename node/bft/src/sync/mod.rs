@@ -539,9 +539,9 @@ impl<N: Network> Sync<N> {
 impl<N: Network> Sync<N> {
     /// Returns `true` if the node is synced and has connected peers.
     pub fn is_synced(&self) -> bool {
-        if self.gateway.number_of_connected_peers() == 0 {
-            return false;
-        }
+        // if self.gateway.number_of_connected_peers() == 0 {
+        //     return false;
+        // }
         self.block_sync.is_block_synced()
     }
 
