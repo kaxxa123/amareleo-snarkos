@@ -345,10 +345,10 @@ impl<N: Network> Primary<N> {
         }
 
         // Submit proposal for validator with id 0
-        let primary_acc = &all_acc[0];
-        let other_acc: Vec<&Account<N>> = all_acc.iter().filter(|acc| acc.address() != primary_acc.address()).collect();
+        let primary_addr = all_acc[0].address();
+        let other_acc: Vec<&Account<N>> = all_acc.iter().filter(|acc| acc.address() != primary_addr).collect();
 
-        let round = self.propose_batch_lite(primary_acc, &other_acc).await?;
+        let round = self.propose_batch_lite(&other_acc).await?;
         if round == 0u64 {
             return Ok(());
         }
@@ -363,7 +363,7 @@ impl<N: Network> Primary<N> {
         Ok(())
     }
 
-    pub async fn propose_batch_lite(&self, primary_acc: &Account<N>, other_acc: &[&Account<N>]) -> Result<u64> {
+    pub async fn propose_batch_lite(&self, other_acc: &[&Account<N>]) -> Result<u64> {
         // This function isn't re-entrant.
         let mut lock_guard = self.propose_lock.lock().await;
 
@@ -385,13 +385,13 @@ impl<N: Network> Primary<N> {
         metrics::gauge(metrics::bft::PROPOSAL_ROUND, round as f64);
 
         // Ensure that the primary does not create a new proposal too quickly.
-        if let Err(e) = self.check_proposal_timestamp(previous_round, primary_acc.address(), now()) {
+        if let Err(e) = self.check_proposal_timestamp(previous_round, self.gateway.account().address(), now()) {
             debug!("Primary is safely skipping a batch proposal - {}", format!("{e}").dimmed());
             return Ok(0u64);
         }
 
         // Ensure the primary has not proposed a batch for this round before.
-        if self.storage.contains_certificate_in_round_from(round, primary_acc.address()) {
+        if self.storage.contains_certificate_in_round_from(round, self.gateway.account().address()) {
             // If a BFT sender was provided, attempt to advance the current round.
             if let Some(bft_sender) = self.bft_sender.get() {
                 match bft_sender.send_primary_round_to_bft(self.current_round()).await {
@@ -429,7 +429,7 @@ impl<N: Network> Primary<N> {
                 other_acc.iter().map(|acc| acc.address()).collect();
             
             // Append the primary to the set.
-            connected_validators.insert(primary_acc.address());
+            connected_validators.insert(self.gateway.account().address());
 
             // If quorum threshold is not reached, return early.
             if !committee_lookback.is_quorum_threshold_reached(&connected_validators) {
@@ -566,7 +566,7 @@ impl<N: Network> Primary<N> {
         info!("Proposing a batch with {} transmissions for round {round}...", transmissions.len());
 
         // Retrieve the private key.
-        let private_key = *primary_acc.private_key();
+        let private_key = *self.gateway.account().private_key();
         // Retrieve the committee ID.
         let committee_id = committee_lookback.id();
         // Prepare the transmission IDs.
@@ -587,12 +587,11 @@ impl<N: Network> Primary<N> {
             Proposal::new(committee_lookback.clone(), batch_header.clone(), transmissions.clone())
                 .map(|proposal| (batch_header, proposal))
         })
-        .map_err(|err| {
+        .inspect_err(|_| {
             // On error, reinsert the transmissions and then propagate the error.
             if let Err(e) = self.reinsert_transmissions_into_workers(transmissions) {
                 error!("Failed to reinsert transmissions: {e:?}");
             }
-            err
         })?;
         // Broadcast the batch to all validators for signing.
         self.gateway.broadcast(Event::BatchPropose(batch_header.clone().into()));
@@ -995,7 +994,34 @@ impl<N: Network> Primary<N> {
         let current_round = self.current_round();
         // Attempt to advance to the next round.
         if current_round < next_round {
-            self.storage.increment_to_next_round(current_round)?;
+            // If a BFT sender was provided, send the current round to the BFT.
+            let is_ready = if let Some(bft_sender) = self.bft_sender.get() {
+                match bft_sender.send_primary_round_to_bft(current_round).await {
+                    Ok(is_ready) => is_ready,
+                    Err(e) => {
+                        warn!("Failed to update the BFT to the next round - {e}");
+                        return Err(e);
+                    }
+                }
+            }
+            // Otherwise, handle the Narwhal case.
+            else {
+                // Update to the next round in storage.
+                self.storage.increment_to_next_round(current_round)?;
+                // Set 'is_ready' to 'true'.
+                true
+            };
+
+            // Log whether the next round is ready.
+            match is_ready {
+                true => debug!("Primary is ready to propose the next round"),
+                false => debug!("Primary is not ready to propose the next round"),
+            }
+
+            // // If the node is ready, propose a batch for the next round.
+            // if is_ready {
+            //     self.propose_batch().await?;
+            // }
         }
         Ok(())
     }
