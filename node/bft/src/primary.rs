@@ -55,6 +55,8 @@ use snarkvm::{
         narwhal::{BatchCertificate, BatchHeader, Data, Transmission, TransmissionID},
         puzzle::{Solution, SolutionID},
     },
+    prelude::committee::Committee,
+    prelude::Signature,
 };
 
 use colored::Colorize;
@@ -622,36 +624,11 @@ impl<N: Network> Primary<N> {
 
         // Store the certified batch and broadcast it to all validators.
         // If there was an error storing the certificate, reinsert the transmissions back into the ready queue.
-
-        // Create the batch certificate and transmissions.
-        let (certificate, transmissions) = tokio::task::block_in_place(|| proposal.to_certificate(&committee_lookback))?;
-
-        // Convert the transmissions into a HashMap.
-        // Note: Do not change the `Proposal` to use a HashMap. The ordering there is necessary for safety.
-        let transmissions = transmissions.into_iter().collect::<HashMap<_, _>>();
-
-        // Store the certified batch.
-        let (storage, certificate_) = (self.storage.clone(), certificate.clone());
-        spawn_blocking!(storage.insert_certificate(certificate_, transmissions, Default::default()))?;
-        debug!("Stored a batch certificate for round {round}");
-
-        // If a BFT sender was provided, send the certificate to the BFT.
-        if let Some(bft_sender) = self.bft_sender.get() {
-            // Await the callback to continue.
-            if let Err(e) = bft_sender.send_primary_certificate_to_bft(certificate.clone()).await {
-                warn!("Failed to update the BFT DAG from primary - {e}");
-                return Err(e);
-            };
+        if let Err(e) = self.store_and_broadcast_certificate_lite(&proposal, &committee_lookback).await {
+            // Reinsert the transmissions back into the ready queue for the next proposal.
+            self.reinsert_transmissions_into_workers(proposal.into_transmissions())?;
+            return Err(e);
         }
-
-        // Broadcast the certified batch to all validators.
-        self.gateway.broadcast(Event::BatchCertified(certificate.clone().into()));
-
-        // Log the certified batch.
-        let num_transmissions = certificate.transmission_ids().len();
-        info!("\n\nOur batch with {num_transmissions} transmissions for round {round} was certified!\n");
-
-        self.try_increment_to_the_next_round_lite(round + 1).await?;
 
         #[cfg(feature = "metrics")]
         metrics::increment_gauge(metrics::bft::CERTIFIED_BATCHES, 1.0);
@@ -688,6 +665,7 @@ impl<N: Network> Primary<N> {
 
         // Retrieve the batch ID.
         let batch_id = batch_header.batch_id();
+        let mut our_sign: Option<Signature<N>> = None;
 
         // Forge signatures of other validators.
         for acc in other_acc.iter() {
@@ -696,9 +674,19 @@ impl<N: Network> Primary<N> {
             let signer = signer_acc.address();
             let signature = spawn_blocking!(signer_acc.sign(&[batch_id], &mut rand::thread_rng()))?;
 
+            if signer == self.gateway.account().address() {
+                our_sign = Some(signature);
+            }
+
             // Add the signature to the batch.
             proposal.add_signature(signer, signature, &committee_lookback)?;
         }
+
+        // Ensure our signature was not inserted (validator 0 signature)
+        let our_sign = match our_sign {
+            Some(sign) => sign,
+            None => bail!("Fake Proposal generation failed. Validator 0 signature missing."),
+        };
 
         // Create the batch certificate and transmissions.
         let (certificate, transmissions) = tokio::task::block_in_place(|| proposal.to_certificate(&committee_lookback))?;
@@ -711,6 +699,35 @@ impl<N: Network> Primary<N> {
         let (storage, certificate_) = (self.storage.clone(), certificate.clone());
         spawn_blocking!(storage.insert_certificate(certificate_, transmissions, Default::default()))?;
         debug!("Stored a batch certificate for validator/round {vid}/{round}");
+
+        match self.signed_proposals.write().0.entry(primary_acc.address()) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                // If the validator has already signed a batch for this round, then return early,
+                // since, if the peer still has not received the signature, they will request it again,
+                // and the logic at the start of this function will resend the (now cached) signature
+                // to the peer if asked to sign this batch proposal again.
+                if entry.get().0 == round {
+                    return Ok(());
+                }
+                // Otherwise, cache the round, batch ID, and signature for this validator.
+                entry.insert((round, batch_id, our_sign));
+                debug!("Inserted signature to signed_proposals {vid}/{round}");
+            }
+            // If the validator has not signed a batch before, then continue.
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                // Cache the round, batch ID, and signature for this validator.
+                entry.insert((round, batch_id, our_sign));
+                debug!("Inserted signature to signed_proposals {vid}/{round}");
+            }
+        };
+
+        if let Some(bft_sender) = self.bft_sender.get() {
+            // Send the certificate to the BFT.
+            if let Err(e) = bft_sender.send_primary_certificate_to_bft(certificate).await {
+                warn!("Failed to update the BFT DAG from sync: {e}");
+                return Err(e);
+            };
+        }
 
         Ok(())
     }
@@ -1048,6 +1065,35 @@ impl<N: Network> Primary<N> {
             true => bail!("Timestamp is too soon after the previous certificate at round {previous_round}"),
             false => Ok(()),
         }
+    }
+
+    /// Stores the certified batch and broadcasts it to all validators, returning the certificate.
+    async fn store_and_broadcast_certificate_lite(&self, proposal: &Proposal<N>, committee: &Committee<N>) -> Result<()> {
+        // Create the batch certificate and transmissions.
+        let (certificate, transmissions) = tokio::task::block_in_place(|| proposal.to_certificate(committee))?;
+        // Convert the transmissions into a HashMap.
+        // Note: Do not change the `Proposal` to use a HashMap. The ordering there is necessary for safety.
+        let transmissions = transmissions.into_iter().collect::<HashMap<_, _>>();
+        // Store the certified batch.
+        let (storage, certificate_) = (self.storage.clone(), certificate.clone());
+        spawn_blocking!(storage.insert_certificate(certificate_, transmissions, Default::default()))?;
+        debug!("Stored a batch certificate for round {}", certificate.round());
+        // If a BFT sender was provided, send the certificate to the BFT.
+        if let Some(bft_sender) = self.bft_sender.get() {
+            // Await the callback to continue.
+            if let Err(e) = bft_sender.send_primary_certificate_to_bft(certificate.clone()).await {
+                warn!("Failed to update the BFT DAG from primary - {e}");
+                return Err(e);
+            };
+        }
+        // Broadcast the certified batch to all validators.
+        self.gateway.broadcast(Event::BatchCertified(certificate.clone().into()));
+        // Log the certified batch.
+        let num_transmissions = certificate.transmission_ids().len();
+        let round = certificate.round();
+        info!("\n\nOur batch with {num_transmissions} transmissions for round {round} was certified!\n");
+        // Increment to the next round.
+        self.try_increment_to_the_next_round_lite(round + 1).await
     }
 
     /// Stores the certified batch and broadcasts it to all validators, returning the certificate.
