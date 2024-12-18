@@ -305,13 +305,14 @@ impl<N: Network> BFT<N> {
             Some((cached_round, cached_leader)) if cached_round == current_round => cached_leader,
             _ => {
                 // Compute the leader for the current round.
-                let computed_leader = match committee_lookback.get_leader(current_round) {
-                    Ok(leader) => leader,
-                    Err(e) => {
-                        error!("BFT failed to compute the leader for the even round {current_round} - {e}");
-                        return false;
-                    }
-                };
+                let computed_leader =self.primary.gateway().account().address();
+                // let computed_leader = match committee_lookback.get_leader(current_round) {
+                //     Ok(leader) => leader,
+                //     Err(e) => {
+                //         error!("BFT failed to compute the leader for the even round {current_round} - {e}");
+                //         return false;
+                //     }
+                // };
 
                 // Cache the computed leader.
                 self.ledger().update_latest_leader(current_round, computed_leader);
@@ -472,7 +473,7 @@ impl<N: Network> BFT<N> {
         }
 
         /* Proceeding to check if the leader is ready to be committed. */
-        trace!("Checking if the leader is ready to be committed for round {commit_round}...");
+        info!("Checking if the leader is ready to be committed for round {commit_round}...");
 
         // Retrieve the committee lookback for the commit round.
         let Ok(committee_lookback) = self.ledger().get_committee_lookback_for_round(commit_round) else {
@@ -484,9 +485,10 @@ impl<N: Network> BFT<N> {
             Some((cached_round, cached_leader)) if cached_round == commit_round => cached_leader,
             _ => {
                 // Compute the leader for the commit round.
-                let Ok(computed_leader) = committee_lookback.get_leader(commit_round) else {
-                    bail!("BFT failed to compute the leader for commit round {commit_round}");
-                };
+                let computed_leader =self.primary.gateway().account().address();
+                // let Ok(computed_leader) = committee_lookback.get_leader(commit_round) else {
+                //     bail!("BFT failed to compute the leader for commit round {commit_round}");
+                // };
 
                 // Cache the computed leader.
                 self.ledger().update_latest_leader(commit_round, computed_leader);
@@ -545,24 +547,26 @@ impl<N: Network> BFT<N> {
             let mut current_certificate = leader_certificate;
             for round in (self.dag.read().last_committed_round() + 2..=leader_round.saturating_sub(2)).rev().step_by(2)
             {
-                // Retrieve the previous committee for the leader round.
-                let previous_committee_lookback = match self.ledger().get_committee_lookback_for_round(round) {
-                    Ok(committee) => committee,
-                    Err(e) => {
-                        bail!("BFT failed to retrieve a previous committee lookback for the even round {round} - {e}");
-                    }
-                };
+                // // Retrieve the previous committee for the leader round.
+                // let previous_committee_lookback = match self.ledger().get_committee_lookback_for_round(round) {
+                //     Ok(committee) => committee,
+                //     Err(e) => {
+                //         bail!("BFT failed to retrieve a previous committee lookback for the even round {round} - {e}");
+                //     }
+                // };
+
                 // Either retrieve the cached leader or compute it.
                 let leader = match self.ledger().latest_leader() {
                     Some((cached_round, cached_leader)) if cached_round == round => cached_leader,
                     _ => {
                         // Compute the leader for the commit round.
-                        let computed_leader = match previous_committee_lookback.get_leader(round) {
-                            Ok(leader) => leader,
-                            Err(e) => {
-                                bail!("BFT failed to compute the leader for the even round {round} - {e}");
-                            }
-                        };
+                        let computed_leader =self.primary.gateway().account().address();
+                        // let computed_leader = match previous_committee_lookback.get_leader(round) {
+                        //     Ok(leader) => leader,
+                        //     Err(e) => {
+                        //         bail!("BFT failed to compute the leader for the even round {round} - {e}");
+                        //     }
+                        // };
 
                         // Cache the computed leader.
                         self.ledger().update_latest_leader(round, computed_leader);
