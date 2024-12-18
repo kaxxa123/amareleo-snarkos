@@ -507,7 +507,7 @@ mod tests {
         rt.block_on(async {
             let client = reqwest::Client::builder().use_rustls_tls().build().unwrap();
             let height =
-                cdn_get::<u32>(client, &format!("{TEST_BASE_URL}/mainnet/latest/height"), "height").await.unwrap();
+                cdn_get::<u32>(client, &format!("{TEST_BASE_URL}/mainnet/block/height/latest"), "height").await.unwrap();
             assert!(height > 0);
         });
     }
