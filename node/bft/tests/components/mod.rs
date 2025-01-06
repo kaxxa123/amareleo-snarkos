@@ -14,6 +14,5 @@
 // limitations under the License.
 
 pub mod pending;
-pub mod worker;
 
 const ITERATIONS: u32 = 100;

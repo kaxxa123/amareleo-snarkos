@@ -16,7 +16,7 @@
 use crate::{
     MAX_WORKERS,
     ProposedBatch,
-    helpers::{Pending, Ready, Storage, fmt_id},
+    helpers::{Ready, Storage, fmt_id},
 };
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkvm::{
@@ -44,8 +44,6 @@ pub struct Worker<N: Network> {
     proposed_batch: Arc<ProposedBatch<N>>,
     /// The ready queue.
     ready: Ready<N>,
-    /// The pending transmissions queue.
-    pending: Arc<Pending<TransmissionID<N>, Transmission<N>>>,
 }
 
 impl<N: Network> Worker<N> {
@@ -59,17 +57,12 @@ impl<N: Network> Worker<N> {
         // Ensure the worker ID is valid.
         ensure!(id < MAX_WORKERS, "Invalid worker ID '{id}'");
         // Return the worker.
-        Ok(Self { id, storage, ledger, proposed_batch, ready: Default::default(), pending: Default::default() })
+        Ok(Self { id, storage, ledger, proposed_batch, ready: Default::default() })
     }
 
     /// Returns the worker ID.
     pub const fn id(&self) -> u8 {
         self.id
-    }
-
-    /// Returns a reference to the pending transmissions queue.
-    pub fn pending(&self) -> &Arc<Pending<TransmissionID<N>, Transmission<N>>> {
-        &self.pending
     }
 }
 
@@ -208,8 +201,6 @@ impl<N: Network> Worker<N> {
         let checksum = solution.to_checksum::<N>()?;
         // Construct the transmission ID.
         let transmission_id = TransmissionID::Solution(solution_id, checksum);
-        // Remove the solution ID from the pending queue.
-        self.pending.remove(transmission_id, Some(transmission.clone()));
         // Check if the solution exists.
         if self.contains_transmission(transmission_id) {
             bail!("Solution '{}.{}' already exists.", fmt_id(solution_id), fmt_id(checksum).dimmed());
@@ -240,8 +231,6 @@ impl<N: Network> Worker<N> {
         let checksum = transaction.to_checksum::<N>()?;
         // Construct the transmission ID.
         let transmission_id = TransmissionID::Transaction(transaction_id, checksum);
-        // Remove the transaction from the pending queue.
-        self.pending.remove(transmission_id, Some(transmission.clone()));
         // Check if the transaction ID exists.
         if self.contains_transmission(transmission_id) {
             bail!("Transaction '{}.{}' already exists.", fmt_id(transaction_id), fmt_id(checksum).dimmed());
@@ -382,7 +371,6 @@ mod tests {
         let transmission_id = TransmissionID::Solution(solution_id, solution_checksum);
         let result = worker.process_unconfirmed_solution(solution_id, solution).await;
         assert!(result.is_ok());
-        assert!(!worker.pending.contains(transmission_id));
         assert!(worker.ready.contains(transmission_id));
     }
 
@@ -410,7 +398,6 @@ mod tests {
         let transmission_id = TransmissionID::Solution(solution_id, checksum);
         let result = worker.process_unconfirmed_solution(solution_id, solution).await;
         assert!(result.is_err());
-        assert!(!worker.pending.contains(transmission_id));
         assert!(!worker.ready.contains(transmission_id));
     }
 
@@ -438,7 +425,6 @@ mod tests {
         let transmission_id = TransmissionID::Transaction(transaction_id, checksum);
         let result = worker.process_unconfirmed_transaction(transaction_id, transaction).await;
         assert!(result.is_ok());
-        assert!(!worker.pending.contains(transmission_id));
         assert!(worker.ready.contains(transmission_id));
     }
 
@@ -466,7 +452,6 @@ mod tests {
         let transmission_id = TransmissionID::Transaction(transaction_id, checksum);
         let result = worker.process_unconfirmed_transaction(transaction_id, transaction).await;
         assert!(result.is_err());
-        assert!(!worker.pending.contains(transmission_id));
         assert!(!worker.ready.contains(transmission_id));
     }
 
