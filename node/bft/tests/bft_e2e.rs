@@ -21,9 +21,7 @@ mod components;
 use crate::common::primary::{TestNetwork, TestNetworkConfig};
 use deadline::deadline;
 use itertools::Itertools;
-use snarkos_node_bft::MAX_FETCH_TIMEOUT_IN_MS;
 use std::time::Duration;
-use tokio::time::sleep;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "long-running e2e test"]
@@ -34,11 +32,9 @@ async fn test_state_coherence() {
     let mut network = TestNetwork::new(TestNetworkConfig {
         num_nodes: N,
         bft: true,
-        connect_all: true,
         fire_transmissions: Some(TRANSMISSION_INTERVAL_MS),
         // Set this to Some(0..=4) to see the logs.
         log_level: Some(0),
-        log_connections: true,
     });
 
     network.start().await;
@@ -55,11 +51,9 @@ async fn test_resync() {
     let mut network = TestNetwork::new(TestNetworkConfig {
         num_nodes: N,
         bft: true,
-        connect_all: true,
         fire_transmissions: Some(TRANSMISSION_INTERVAL_MS),
         // Set this to Some(0..=4) to see the logs.
         log_level: Some(0),
-        log_connections: false,
     });
     network.start().await;
 
@@ -68,16 +62,8 @@ async fn test_resync() {
     let network_clone = network.clone();
     deadline!(Duration::from_secs(20), move || { network_clone.is_round_reached(BREAK_ROUND) });
 
-    network.disconnect(N).await;
-
-    let mut spare_network = TestNetwork::new(TestNetworkConfig {
-        num_nodes: N,
-        bft: true,
-        connect_all: false,
-        fire_transmissions: None,
-        log_level: None,
-        log_connections: false,
-    });
+    let mut spare_network =
+        TestNetwork::new(TestNetworkConfig { num_nodes: N, bft: true, fire_transmissions: None, log_level: None });
     spare_network.start().await;
 
     for i in 1..N {
@@ -85,64 +71,9 @@ async fn test_resync() {
         network.validators.insert(i, spare_validator);
     }
 
-    network.connect_all().await;
-
     const RECOVERY_ROUND: u64 = 8;
     let network_clone = network.clone();
     deadline!(Duration::from_secs(20), move || { network_clone.is_round_reached(RECOVERY_ROUND) });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_quorum_threshold() {
-    // Start N nodes but don't connect them.
-    const N: u16 = 4;
-    const TRANSMISSION_INTERVAL_MS: u64 = 10;
-
-    let mut network = TestNetwork::new(TestNetworkConfig {
-        num_nodes: N,
-        bft: true,
-        connect_all: false,
-        fire_transmissions: None,
-        // Set this to Some(0..=4) to see the logs.
-        log_level: None,
-        log_connections: true,
-    });
-    network.start().await;
-
-    // Check each node is at round 1 (0 is genesis).
-    for validators in network.validators.values() {
-        assert_eq!(validators.primary.current_round(), 1);
-    }
-
-    // Start the cannons for node 0.
-    network.fire_transmissions_at(0, TRANSMISSION_INTERVAL_MS);
-
-    sleep(Duration::from_millis(MAX_FETCH_TIMEOUT_IN_MS)).await;
-
-    // Check each node is still at round 1.
-    for validator in network.validators.values() {
-        assert_eq!(validator.primary.current_round(), 1);
-    }
-
-    // Connect the first two nodes and start the cannons for node 1.
-    network.connect_validators(0, 1).await;
-    network.fire_transmissions_at(1, TRANSMISSION_INTERVAL_MS);
-
-    sleep(Duration::from_millis(MAX_FETCH_TIMEOUT_IN_MS)).await;
-
-    // Check each node is still at round 1.
-    for validator in network.validators.values() {
-        assert_eq!(validator.primary.current_round(), 1);
-    }
-
-    // Connect the third node and start the cannons for it.
-    network.connect_validators(0, 2).await;
-    network.connect_validators(1, 2).await;
-    network.fire_transmissions_at(2, TRANSMISSION_INTERVAL_MS);
-
-    // Check the nodes reach quorum and advance through the rounds.
-    const TARGET_ROUND: u64 = 4;
-    deadline!(Duration::from_secs(20), move || { network.is_round_reached(TARGET_ROUND) });
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -153,11 +84,9 @@ async fn test_quorum_break() {
     let mut network = TestNetwork::new(TestNetworkConfig {
         num_nodes: N,
         bft: true,
-        connect_all: true,
         fire_transmissions: Some(TRANSMISSION_INTERVAL_MS),
         // Set this to Some(0..=4) to see the logs.
         log_level: None,
-        log_connections: true,
     });
     network.start().await;
 
@@ -166,10 +95,6 @@ async fn test_quorum_break() {
     // Note: cloning the network is fine because the primaries it wraps are `Arc`ed.
     let network_clone = network.clone();
     deadline!(Duration::from_secs(20), move || { network_clone.is_round_reached(TARGET_ROUND) });
-
-    // Break the quorum by disconnecting two nodes.
-    const NUM_NODES: u16 = 2;
-    network.disconnect(NUM_NODES).await;
 
     // Check the nodes have stopped advancing through the rounds.
     assert!(network.is_halted().await);
@@ -189,11 +114,9 @@ async fn test_leader_election_consistency() {
     let mut network = TestNetwork::new(TestNetworkConfig {
         num_nodes: N,
         bft: true,
-        connect_all: true,
         fire_transmissions: Some(CANNON_INTERVAL_MS),
         // Set this to Some(0..=4) to see the logs.
         log_level: None,
-        log_connections: true,
     });
     network.start().await;
 
@@ -230,48 +153,4 @@ async fn test_leader_election_consistency() {
         // Assert that all leaders are equal
         assert!(leaders.iter().all_equal());
     }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "run multiple times to see failure"]
-async fn test_transient_break() {
-    // Start N nodes, connect them and start the cannons for each.
-    const N: u16 = 4;
-    const TRANSMISSION_INTERVAL_MS: u64 = 10;
-    let mut network = TestNetwork::new(TestNetworkConfig {
-        num_nodes: N,
-        bft: true,
-        connect_all: true,
-        fire_transmissions: Some(TRANSMISSION_INTERVAL_MS),
-        // Set this to Some(0..=4) to see the logs.
-        log_level: Some(6),
-        log_connections: false,
-    });
-    network.start().await;
-
-    // Check the nodes have started advancing through the rounds.
-    const FIRST_BREAK_ROUND: u64 = 10;
-    let network_clone = network.clone();
-    deadline!(Duration::from_secs(60), move || { network_clone.is_round_reached(FIRST_BREAK_ROUND) });
-
-    // Disconnect the last node.
-    network.disconnect_one(3).await;
-
-    // Check the nodes have started advancing through the rounds.
-    const SECOND_BREAK_ROUND: u64 = 25;
-    let network_clone = network.clone();
-    deadline!(Duration::from_secs(80), move || { network_clone.is_round_reached(SECOND_BREAK_ROUND) });
-
-    // Disconnect another node, break quorum.
-    network.disconnect_one(2).await;
-
-    // Check the nodes have stopped advancing through the rounds.
-    assert!(network.is_halted().await);
-
-    // Connect the last node again.
-    network.connect_one(3).await;
-
-    const RECOVERY_ROUND: u64 = 30;
-    let network_clone = network.clone();
-    deadline!(Duration::from_secs(60), move || { network_clone.is_round_reached(RECOVERY_ROUND) });
 }

@@ -18,11 +18,8 @@ use crate::{
     MAX_BATCH_DELAY_IN_MS,
     MAX_WORKERS,
     MIN_BATCH_DELAY_IN_SECS,
-    PRIMARY_PING_IN_MS,
     Sync,
-    Transport,
     Worker,
-    events::Event,
     helpers::{
         BFTSender,
         PrimaryReceiver,
@@ -35,13 +32,11 @@ use crate::{
         assign_to_workers,
         fmt_id,
         init_sync_channels,
-        init_worker_channels,
         now,
     },
     spawn_blocking,
 };
 use snarkos_account::Account;
-use snarkos_node_bft_events::PrimaryPing;
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_sync::DUMMY_SELF_IP;
 use snarkvm::{
@@ -86,8 +81,8 @@ pub type ProposedBatch<N> = RwLock<Option<Proposal<N>>>;
 pub struct Primary<N: Network> {
     /// The sync module.
     sync: Sync<N>,
-    /// The gateway.
-    gateway: Gateway<N>,
+    /// Account
+    account: Account<N>,
     /// The storage.
     storage: Storage<N>,
     /// The ledger service.
@@ -122,14 +117,14 @@ impl<N: Network> Primary<N> {
         dev: Option<u16>,
     ) -> Result<Self> {
         // Initialize the gateway.
-        let gateway = Gateway::new(account, storage.clone(), ledger.clone(), ip, trusted_validators, dev)?;
+        let gateway = Gateway::new(account.clone(), storage.clone(), ledger.clone(), ip, trusted_validators, dev)?;
         // Initialize the sync module.
         let sync = Sync::new(gateway.clone(), storage.clone(), ledger.clone());
 
         // Initialize the primary instance.
         Ok(Self {
             sync,
-            gateway,
+            account,
             storage,
             ledger,
             workers: Arc::from(vec![]),
@@ -145,9 +140,9 @@ impl<N: Network> Primary<N> {
     /// Load the proposal cache file and update the Primary state with the stored data.
     async fn load_proposal_cache(&self) -> Result<()> {
         // Fetch the signed proposals from the file system if it exists.
-        match ProposalCache::<N>::exists(self.gateway.dev()) {
+        match ProposalCache::<N>::exists(Some(0u16)) {
             // If the proposal cache exists, then process the proposal cache.
-            true => match ProposalCache::<N>::load(self.gateway.account().address(), self.gateway.dev()) {
+            true => match ProposalCache::<N>::load(self.account.address(), Some(0u16)) {
                 Ok(proposal_cache) => {
                     // Extract the proposal and signed proposals.
                     let (latest_certificate_round, proposed_batch, signed_proposals, pending_certificates) =
@@ -186,7 +181,7 @@ impl<N: Network> Primary<N> {
     pub async fn run(
         &mut self,
         bft_sender: Option<BFTSender<N>>,
-        primary_sender: PrimarySender<N>,
+        _primary_sender: PrimarySender<N>,
         primary_receiver: PrimaryReceiver<N>,
     ) -> Result<()> {
         info!("Starting the primary instance of the memory pool...");
@@ -197,35 +192,27 @@ impl<N: Network> Primary<N> {
             self.bft_sender.set(bft_sender.clone()).expect("BFT sender already set");
         }
 
-        // Construct a map of the worker senders.
-        let mut worker_senders = IndexMap::new();
         // Construct a map for the workers.
         let mut workers = Vec::new();
         // Initialize the workers.
         for id in 0..MAX_WORKERS {
-            // Construct the worker channels.
-            let (tx_worker, _) = init_worker_channels();
             // Construct the worker instance.
             let worker = Worker::new(id, self.storage.clone(), self.ledger.clone(), self.proposed_batch.clone())?;
 
             // Add the worker to the list of workers.
             workers.push(worker);
-            // Add the worker sender to the map.
-            worker_senders.insert(id, tx_worker);
         }
         // Set the workers.
         self.workers = Arc::from(workers);
 
         // First, initialize the sync channels.
-        let (sync_sender, sync_receiver) = init_sync_channels();
+        let (_, sync_receiver) = init_sync_channels();
         // Next, initialize the sync module and sync the storage from ledger.
         self.sync.initialize(bft_sender).await?;
         // Next, load and process the proposal cache before running the sync module.
         self.load_proposal_cache().await?;
         // Next, run the sync module.
         self.sync.run(sync_receiver).await?;
-        // Next, initialize the gateway.
-        self.gateway.run(primary_sender, worker_senders, Some(sync_sender)).await;
         // Lastly, start the primary handlers.
         // Note: This ensures the primary does not start communicating before syncing is complete.
         self.start_handlers(primary_receiver);
@@ -243,9 +230,9 @@ impl<N: Network> Primary<N> {
         self.sync.is_synced()
     }
 
-    /// Returns the gateway.
-    pub const fn gateway(&self) -> &Gateway<N> {
-        &self.gateway
+    /// Returns the account of the node.
+    pub const fn account(&self) -> &Account<N> {
+        &self.account
     }
 
     /// Returns the storage.
@@ -378,13 +365,13 @@ impl<N: Network> Primary<N> {
         metrics::gauge(metrics::bft::PROPOSAL_ROUND, round as f64);
 
         // Ensure that the primary does not create a new proposal too quickly.
-        if let Err(e) = self.check_proposal_timestamp(previous_round, self.gateway.account().address(), now()) {
+        if let Err(e) = self.check_proposal_timestamp(previous_round, self.account.address(), now()) {
             debug!("Primary is safely skipping a batch proposal - {}", format!("{e}").dimmed());
             return Ok(0u64);
         }
 
         // Ensure the primary has not proposed a batch for this round before.
-        if self.storage.contains_certificate_in_round_from(round, self.gateway.account().address()) {
+        if self.storage.contains_certificate_in_round_from(round, self.account.address()) {
             // If a BFT sender was provided, attempt to advance the current round.
             if let Some(bft_sender) = self.bft_sender.get() {
                 match bft_sender.send_primary_round_to_bft(self.current_round()).await {
@@ -421,7 +408,7 @@ impl<N: Network> Primary<N> {
             let mut connected_validators: HashSet<Address<N>> = other_acc.iter().map(|acc| acc.address()).collect();
 
             // Append the primary to the set.
-            connected_validators.insert(self.gateway.account().address());
+            connected_validators.insert(self.account.address());
 
             // If quorum threshold is not reached, return early.
             if !committee_lookback.is_quorum_threshold_reached(&connected_validators) {
@@ -558,7 +545,7 @@ impl<N: Network> Primary<N> {
         info!("Proposing a batch with {} transmissions for round {round}...", transmissions.len());
 
         // Retrieve the private key.
-        let private_key = *self.gateway.account().private_key();
+        let private_key = *self.account.private_key();
         // Retrieve the committee ID.
         let committee_id = committee_lookback.id();
         // Prepare the transmission IDs.
@@ -585,8 +572,6 @@ impl<N: Network> Primary<N> {
                 error!("Failed to reinsert transmissions: {e:?}");
             }
         })?;
-        // Broadcast the batch to all validators for signing.
-        self.gateway.broadcast(Event::BatchPropose(batch_header.clone().into()));
         // Set the timestamp of the latest proposed batch.
         *self.latest_proposed_batch_timestamp.write() = proposal.timestamp();
 
@@ -670,7 +655,7 @@ impl<N: Network> Primary<N> {
             let signer = signer_acc.address();
             let signature = spawn_blocking!(signer_acc.sign(&[batch_id], &mut rand::thread_rng()))?;
 
-            if signer == self.gateway.account().address() {
+            if signer == self.account.address() {
                 our_sign = Some(signature);
             }
 
@@ -741,64 +726,6 @@ impl<N: Network> Primary<N> {
             mut rx_unconfirmed_solution,
             mut rx_unconfirmed_transaction,
         } = primary_receiver;
-
-        // Start the primary ping.
-        if self.sync.is_gateway_mode() {
-            let self_ = self.clone();
-            self.spawn(async move {
-                loop {
-                    // Sleep briefly.
-                    tokio::time::sleep(Duration::from_millis(PRIMARY_PING_IN_MS)).await;
-
-                    // Retrieve the block locators.
-                    let self__ = self_.clone();
-                    let block_locators = match spawn_blocking!(self__.sync.get_block_locators()) {
-                        Ok(block_locators) => block_locators,
-                        Err(e) => {
-                            warn!("Failed to retrieve block locators - {e}");
-                            continue;
-                        }
-                    };
-
-                    // Retrieve the latest certificate of the primary.
-                    let primary_certificate = {
-                        // Retrieve the primary address.
-                        let primary_address = self_.gateway.account().address();
-
-                        // Iterate backwards from the latest round to find the primary certificate.
-                        let mut certificate = None;
-                        let mut current_round = self_.current_round();
-                        while certificate.is_none() {
-                            // If the current round is 0, then break the while loop.
-                            if current_round == 0 {
-                                break;
-                            }
-                            // Retrieve the certificates.
-                            let certificates = self_.storage.get_certificates_for_round(current_round);
-                            // Retrieve the primary certificate.
-                            certificate =
-                                certificates.into_iter().find(|certificate| certificate.author() == primary_address);
-                            // If the primary certificate was not found, decrement the round.
-                            if certificate.is_none() {
-                                current_round = current_round.saturating_sub(1);
-                            }
-                        }
-
-                        // Determine if the primary certificate was found.
-                        match certificate {
-                            Some(certificate) => certificate,
-                            // Skip this iteration of the loop (do not send a primary ping).
-                            None => continue,
-                        }
-                    };
-
-                    // Construct the primary ping.
-                    let primary_ping = PrimaryPing::from((<Event<N>>::VERSION, block_locators, primary_certificate));
-                    // Broadcast the event.
-                    self_.gateway.broadcast(Event::PrimaryPing(primary_ping));
-                }
-            });
-        }
 
         // Start the batch proposer.
         let self_ = self.clone();
@@ -1028,7 +955,7 @@ impl<N: Network> Primary<N> {
             // Ensure that the previous certificate was created at least `MIN_BATCH_DELAY_IN_MS` seconds ago.
             Some(certificate) => certificate.timestamp(),
 
-            // AlexZ: Function was handling special case for: self.gateway.account().address() == author
+            // AlexZ: Function was handling special case for: self.account.address() == author
             //        Short-circuited to case when this is true.
             None => *self.latest_proposed_batch_timestamp.read(),
         };
@@ -1067,8 +994,6 @@ impl<N: Network> Primary<N> {
                 return Err(e);
             };
         }
-        // Broadcast the certified batch to all validators.
-        self.gateway.broadcast(Event::BatchCertified(certificate.clone().into()));
         // Log the certified batch.
         let num_transmissions = certificate.transmission_ids().len();
         let round = certificate.round();
@@ -1352,10 +1277,8 @@ impl<N: Network> Primary<N> {
             let pending_certificates = self.storage.get_pending_certificates();
             ProposalCache::new(latest_round, proposal, signed_proposals, pending_certificates)
         };
-        if let Err(err) = proposal_cache.store(self.gateway.dev()) {
+        if let Err(err) = proposal_cache.store(Some(0u16)) {
             error!("Failed to store the current proposal cache: {err}");
         }
-        // Close the gateway.
-        self.gateway.shut_down().await;
     }
 }

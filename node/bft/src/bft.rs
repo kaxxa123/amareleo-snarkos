@@ -305,7 +305,7 @@ impl<N: Network> BFT<N> {
             Some((cached_round, cached_leader)) if cached_round == current_round => cached_leader,
             _ => {
                 // Compute the leader for the current round.
-                let computed_leader =self.primary.gateway().account().address();
+                let computed_leader = self.primary.account().address();
                 // let computed_leader = match committee_lookback.get_leader(current_round) {
                 //     Ok(leader) => leader,
                 //     Err(e) => {
@@ -485,7 +485,7 @@ impl<N: Network> BFT<N> {
             Some((cached_round, cached_leader)) if cached_round == commit_round => cached_leader,
             _ => {
                 // Compute the leader for the commit round.
-                let computed_leader =self.primary.gateway().account().address();
+                let computed_leader = self.primary.account().address();
                 // let Ok(computed_leader) = committee_lookback.get_leader(commit_round) else {
                 //     bail!("BFT failed to compute the leader for commit round {commit_round}");
                 // };
@@ -560,7 +560,7 @@ impl<N: Network> BFT<N> {
                     Some((cached_round, cached_leader)) if cached_round == round => cached_leader,
                     _ => {
                         // Compute the leader for the commit round.
-                        let computed_leader =self.primary.gateway().account().address();
+                        let computed_leader = self.primary.account().address();
                         // let computed_leader = match previous_committee_lookback.get_leader(round) {
                         //     Ok(leader) => leader,
                         //     Err(e) => {

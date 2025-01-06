@@ -63,15 +63,10 @@ pub struct TestNetworkConfig {
     pub num_nodes: u16,
     /// If this is set to `true`, the BFT protocol is started on top of Narwhal.
     pub bft: bool,
-    /// If this is set to `true`, all nodes are connected to each other (when they're first
-    /// started).
-    pub connect_all: bool,
     /// If `Some(i)` is set, the cannons will fire every `i` milliseconds.
     pub fire_transmissions: Option<u64>,
     /// The log level to use for the test.
     pub log_level: Option<u8>,
-    /// If this is set to `true`, the number of connections is logged every 5 seconds.
-    pub log_connections: bool,
 }
 
 /// A test network.
@@ -108,20 +103,6 @@ impl TestValidator {
 
         self.handles.lock().push(solution_handle);
         self.handles.lock().push(transaction_handle);
-    }
-
-    pub fn log_connections(&mut self) {
-        let self_clone = self.clone();
-        self.handles.lock().push(tokio::task::spawn(async move {
-            loop {
-                let connections = self_clone.primary.gateway().connected_peers().read().clone();
-                info!("{} connections", connections.len());
-                for connection in connections {
-                    debug!("  {}", connection);
-                }
-                sleep(Duration::from_secs(5)).await;
-            }
-        }));
     }
 }
 
@@ -206,77 +187,12 @@ impl TestNetwork {
             if let Some(interval_ms) = self.config.fire_transmissions {
                 validator.fire_transmissions(interval_ms);
             }
-
-            if self.config.log_connections {
-                validator.log_connections();
-            }
-        }
-
-        if self.config.connect_all {
-            self.connect_all().await;
         }
     }
 
     // Starts the solution and transaction cannons for node.
     pub fn fire_transmissions_at(&mut self, id: u16, interval_ms: u64) {
         self.validators.get_mut(&id).unwrap().fire_transmissions(interval_ms);
-    }
-
-    // Connects a node to another node.
-    pub async fn connect_validators(&self, first_id: u16, second_id: u16) {
-        let first_validator = self.validators.get(&first_id).unwrap();
-        let second_validator_ip = self.validators.get(&second_id).unwrap().primary.gateway().local_ip();
-        first_validator.primary.gateway().connect(second_validator_ip);
-        // Give the connection time to be established.
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    // Connects all nodes to each other.
-    pub async fn connect_all(&self) {
-        for (validator, other_validator) in self.validators.values().tuple_combinations() {
-            // Connect to the node.
-            let ip = other_validator.primary.gateway().local_ip();
-            validator.primary.gateway().connect(ip);
-            // Give the connection time to be established.
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }
-
-    // Connects a specific node to all other nodes.
-    pub async fn connect_one(&self, id: u16) {
-        let target_validator = self.validators.get(&id).unwrap();
-        let target_ip = target_validator.primary.gateway().local_ip();
-        for validator in self.validators.values() {
-            if validator.id != id {
-                // Connect to the node.
-                validator.primary.gateway().connect(target_ip);
-                // Give the connection time to be established.
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        }
-    }
-
-    // Disconnects N nodes from all other nodes.
-    pub async fn disconnect(&self, num_nodes: u16) {
-        for validator in self.validators.values().take(num_nodes as usize) {
-            for peer_ip in validator.primary.gateway().connected_peers().read().iter() {
-                validator.primary.gateway().disconnect(*peer_ip);
-            }
-        }
-
-        // Give the connections time to be closed.
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    // Disconnects a specific node from all other nodes.
-    pub async fn disconnect_one(&self, id: u16) {
-        let target_validator = self.validators.get(&id).unwrap();
-        for peer_ip in target_validator.primary.gateway().connected_peers().read().iter() {
-            target_validator.primary.gateway().disconnect(*peer_ip);
-        }
-
-        // Give the connections time to be closed.
-        sleep(Duration::from_millis(100)).await;
     }
 
     // Checks if at least 2f + 1 nodes have reached the given round.
