@@ -14,13 +14,9 @@
 // limitations under the License.
 
 use crate::{
-    MAX_FETCH_TIMEOUT_IN_MS,
     MAX_WORKERS,
     ProposedBatch,
-    Transport,
-    events::{Event, TransmissionRequest, TransmissionResponse},
-    helpers::{Pending, Ready, Storage, WorkerReceiver, fmt_id, max_redundant_requests},
-    spawn_blocking,
+    helpers::{Pending, Ready, Storage, fmt_id},
 };
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkvm::{
@@ -34,17 +30,12 @@ use snarkvm::{
 
 use colored::Colorize;
 use indexmap::{IndexMap, IndexSet};
-use parking_lot::Mutex;
-use rand::seq::IteratorRandom;
-use std::{future::Future, net::SocketAddr, sync::Arc, time::Duration};
-use tokio::{sync::oneshot, task::JoinHandle, time::timeout};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Worker<N: Network> {
     /// The worker ID.
     id: u8,
-    /// The gateway.
-    gateway: Arc<dyn Transport<N>>,
     /// The storage.
     storage: Storage<N>,
     /// The ledger service.
@@ -55,15 +46,12 @@ pub struct Worker<N: Network> {
     ready: Ready<N>,
     /// The pending transmissions queue.
     pending: Arc<Pending<TransmissionID<N>, Transmission<N>>>,
-    /// The spawned handles.
-    handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl<N: Network> Worker<N> {
     /// Initializes a new worker instance.
     pub fn new(
         id: u8,
-        gateway: Arc<dyn Transport<N>>,
         storage: Storage<N>,
         ledger: Arc<dyn LedgerService<N>>,
         proposed_batch: Arc<ProposedBatch<N>>,
@@ -71,23 +59,7 @@ impl<N: Network> Worker<N> {
         // Ensure the worker ID is valid.
         ensure!(id < MAX_WORKERS, "Invalid worker ID '{id}'");
         // Return the worker.
-        Ok(Self {
-            id,
-            gateway,
-            storage,
-            ledger,
-            proposed_batch,
-            ready: Default::default(),
-            pending: Default::default(),
-            handles: Default::default(),
-        })
-    }
-
-    /// Run the worker instance.
-    pub fn run(&self, receiver: WorkerReceiver<N>) {
-        info!("Starting worker instance {} of the memory pool...", self.id);
-        // Start the worker handlers.
-        self.start_handlers(receiver);
+        Ok(Self { id, storage, ledger, proposed_batch, ready: Default::default(), pending: Default::default() })
     }
 
     /// Returns the worker ID.
@@ -196,19 +168,14 @@ impl<N: Network> Worker<N> {
     /// Returns the transmissions if it exists in the worker, or requests it from the specified peer.
     pub async fn get_or_fetch_transmission(
         &self,
-        peer_ip: SocketAddr,
         transmission_id: TransmissionID<N>,
     ) -> Result<(TransmissionID<N>, Transmission<N>)> {
         // Attempt to get the transmission from the worker.
         if let Some(transmission) = self.get_transmission(transmission_id) {
             return Ok((transmission_id, transmission));
         }
-        // Send a transmission request to the peer.
-        let (candidate_id, transmission) = self.send_transmission_request(peer_ip, transmission_id).await?;
-        // Ensure the transmission ID matches.
-        ensure!(candidate_id == transmission_id, "Invalid transmission ID");
-        // Return the transmission.
-        Ok((transmission_id, transmission))
+
+        bail!("Unable to fetch transmission");
     }
 
     /// Removes up to the specified number of transmissions from the ready queue, and returns them.
@@ -225,97 +192,9 @@ impl<N: Network> Worker<N> {
         }
         false
     }
-
-    /// Broadcasts a worker ping event.
-    pub(crate) fn broadcast_ping(&self) {
-        // Retrieve the transmission IDs.
-        let transmission_ids = self
-            .ready
-            .transmission_ids()
-            .into_iter()
-            .choose_multiple(&mut rand::thread_rng(), Self::MAX_TRANSMISSIONS_PER_WORKER_PING)
-            .into_iter()
-            .collect::<IndexSet<_>>();
-
-        // Broadcast the ping event.
-        if !transmission_ids.is_empty() {
-            self.gateway.broadcast(Event::WorkerPing(transmission_ids.into()));
-        }
-    }
 }
 
 impl<N: Network> Worker<N> {
-    /// Handles the incoming transmission ID from a worker ping event.
-    fn process_transmission_id_from_ping(&self, peer_ip: SocketAddr, transmission_id: TransmissionID<N>) {
-        // Check if the transmission ID exists.
-        if self.contains_transmission(transmission_id) {
-            return;
-        }
-        // If the ready queue is full, then skip this transmission.
-        // Note: We must prioritize the unconfirmed solutions and unconfirmed transactions, not transmissions.
-        if self.ready.num_transmissions() > Self::MAX_TRANSMISSIONS_PER_WORKER {
-            return;
-        }
-        // Attempt to fetch the transmission from the peer.
-        let self_ = self.clone();
-        tokio::spawn(async move {
-            // Send a transmission request to the peer.
-            match self_.send_transmission_request(peer_ip, transmission_id).await {
-                // If the transmission was fetched, then process it.
-                Ok((candidate_id, transmission)) => {
-                    // Ensure the transmission ID matches.
-                    if candidate_id == transmission_id {
-                        // Insert the transmission into the ready queue.
-                        // Note: This method checks `contains_transmission` again, because by the time the transmission is fetched,
-                        // it could have already been inserted into the ready queue.
-                        self_.process_transmission_from_peer(peer_ip, transmission_id, transmission);
-                    }
-                }
-                // If the transmission was not fetched, then attempt to fetch it again.
-                Err(e) => {
-                    warn!(
-                        "Worker {} - Failed to fetch transmission '{}.{}' from '{peer_ip}' (ping) - {e}",
-                        self_.id,
-                        fmt_id(transmission_id),
-                        fmt_id(transmission_id.checksum().unwrap_or_default()).dimmed()
-                    );
-                }
-            }
-        });
-    }
-
-    /// Handles the incoming transmission from a peer.
-    pub(crate) fn process_transmission_from_peer(
-        &self,
-        peer_ip: SocketAddr,
-        transmission_id: TransmissionID<N>,
-        transmission: Transmission<N>,
-    ) {
-        // If the transmission ID already exists, then do not store it.
-        if self.contains_transmission(transmission_id) {
-            return;
-        }
-        // Ensure the transmission ID and transmission type matches.
-        let is_well_formed = match (&transmission_id, &transmission) {
-            (TransmissionID::Solution(_, _), Transmission::Solution(_)) => true,
-            (TransmissionID::Transaction(_, _), Transmission::Transaction(_)) => true,
-            // Note: We explicitly forbid inserting ratifications into the ready queue,
-            // as the protocol currently does not support ratifications.
-            (TransmissionID::Ratification, Transmission::Ratification) => false,
-            // All other combinations are clearly invalid.
-            _ => false,
-        };
-        // If the transmission ID and transmission type matches, then insert the transmission into the ready queue.
-        if is_well_formed && self.ready.insert(transmission_id, transmission) {
-            trace!(
-                "Worker {} - Added transmission '{}.{}' from '{peer_ip}'",
-                self.id,
-                fmt_id(transmission_id),
-                fmt_id(transmission_id.checksum().unwrap_or_default()).dimmed()
-            );
-        }
-    }
-
     /// Handles the incoming unconfirmed solution.
     /// Note: This method assumes the incoming solution is valid and does not exist in the ledger.
     pub(crate) async fn process_unconfirmed_solution(
@@ -382,149 +261,11 @@ impl<N: Network> Worker<N> {
     }
 }
 
-impl<N: Network> Worker<N> {
-    /// Starts the worker handlers.
-    fn start_handlers(&self, receiver: WorkerReceiver<N>) {
-        let WorkerReceiver { mut rx_worker_ping, mut rx_transmission_request, mut rx_transmission_response } = receiver;
-
-        // Start the pending queue expiration loop.
-        let self_ = self.clone();
-        self.spawn(async move {
-            loop {
-                // Sleep briefly.
-                tokio::time::sleep(Duration::from_millis(MAX_FETCH_TIMEOUT_IN_MS)).await;
-
-                // Remove the expired pending certificate requests.
-                let self__ = self_.clone();
-                let _ = spawn_blocking!({
-                    self__.pending.clear_expired_callbacks();
-                    Ok(())
-                });
-            }
-        });
-
-        // Process the ping events.
-        let self_ = self.clone();
-        self.spawn(async move {
-            while let Some((peer_ip, transmission_id)) = rx_worker_ping.recv().await {
-                self_.process_transmission_id_from_ping(peer_ip, transmission_id);
-            }
-        });
-
-        // Process the transmission requests.
-        let self_ = self.clone();
-        self.spawn(async move {
-            while let Some((peer_ip, transmission_request)) = rx_transmission_request.recv().await {
-                self_.send_transmission_response(peer_ip, transmission_request);
-            }
-        });
-
-        // Process the transmission responses.
-        let self_ = self.clone();
-        self.spawn(async move {
-            while let Some((peer_ip, transmission_response)) = rx_transmission_response.recv().await {
-                // Process the transmission response.
-                let self__ = self_.clone();
-                let _ = spawn_blocking!({
-                    self__.finish_transmission_request(peer_ip, transmission_response);
-                    Ok(())
-                });
-            }
-        });
-    }
-
-    /// Sends a transmission request to the specified peer.
-    async fn send_transmission_request(
-        &self,
-        peer_ip: SocketAddr,
-        transmission_id: TransmissionID<N>,
-    ) -> Result<(TransmissionID<N>, Transmission<N>)> {
-        // Initialize a oneshot channel.
-        let (callback_sender, callback_receiver) = oneshot::channel();
-        // Determine how many sent requests are pending.
-        let num_sent_requests = self.pending.num_sent_requests(transmission_id);
-        // Determine if we've already sent a request to the peer.
-        let contains_peer_with_sent_request = self.pending.contains_peer_with_sent_request(transmission_id, peer_ip);
-        // Determine the maximum number of redundant requests.
-        let num_redundant_requests = max_redundant_requests(self.ledger.clone(), self.storage.current_round());
-        // Determine if we should send a transmission request to the peer.
-        // We send at most `num_redundant_requests` requests and each peer can only receive one request at a time.
-        let should_send_request = num_sent_requests < num_redundant_requests && !contains_peer_with_sent_request;
-
-        // Insert the transmission ID into the pending queue.
-        self.pending.insert(transmission_id, peer_ip, Some((callback_sender, should_send_request)));
-
-        // If the number of requests is less than or equal to the the redundancy factor, send the transmission request to the peer.
-        if should_send_request {
-            // Send the transmission request to the peer.
-            if self.gateway.send(peer_ip, Event::TransmissionRequest(transmission_id.into())).await.is_none() {
-                bail!("Unable to fetch transmission - failed to send request")
-            }
-        } else {
-            debug!(
-                "Skipped sending request for transmission {}.{} to '{peer_ip}' ({num_sent_requests} redundant requests)",
-                fmt_id(transmission_id),
-                fmt_id(transmission_id.checksum().unwrap_or_default()).dimmed()
-            );
-        }
-        // Wait for the transmission to be fetched.
-        match timeout(Duration::from_millis(MAX_FETCH_TIMEOUT_IN_MS), callback_receiver).await {
-            // If the transmission was fetched, return it.
-            Ok(result) => Ok((transmission_id, result?)),
-            // If the transmission was not fetched, return an error.
-            Err(e) => bail!("Unable to fetch transmission - (timeout) {e}"),
-        }
-    }
-
-    /// Handles the incoming transmission response.
-    /// This method ensures the transmission response is well-formed and matches the transmission ID.
-    fn finish_transmission_request(&self, peer_ip: SocketAddr, response: TransmissionResponse<N>) {
-        let TransmissionResponse { transmission_id, mut transmission } = response;
-        // Check if the peer IP exists in the pending queue for the given transmission ID.
-        let exists = self.pending.get_peers(transmission_id).unwrap_or_default().contains(&peer_ip);
-        // If the peer IP exists, finish the pending request.
-        if exists {
-            // Ensure the transmission is not a fee and matches the transmission ID.
-            match self.ledger.ensure_transmission_is_well_formed(transmission_id, &mut transmission) {
-                Ok(()) => {
-                    // Remove the transmission ID from the pending queue.
-                    self.pending.remove(transmission_id, Some(transmission));
-                }
-                Err(err) => warn!("Failed to finish transmission response from peer '{peer_ip}': {err}"),
-            };
-        }
-    }
-
-    /// Sends the requested transmission to the specified peer.
-    fn send_transmission_response(&self, peer_ip: SocketAddr, request: TransmissionRequest<N>) {
-        let TransmissionRequest { transmission_id } = request;
-        // Attempt to retrieve the transmission.
-        if let Some(transmission) = self.get_transmission(transmission_id) {
-            // Send the transmission response to the peer.
-            let self_ = self.clone();
-            tokio::spawn(async move {
-                self_.gateway.send(peer_ip, Event::TransmissionResponse((transmission_id, transmission).into())).await;
-            });
-        }
-    }
-
-    /// Spawns a task with the given future; it should only be used for long-running tasks.
-    fn spawn<T: Future<Output = ()> + Send + 'static>(&self, future: T) {
-        self.handles.lock().push(tokio::spawn(future));
-    }
-
-    /// Shuts down the worker.
-    pub(crate) fn shut_down(&self) {
-        trace!("Shutting down worker {}...", self.id);
-        // Abort the tasks.
-        self.handles.lock().iter().for_each(|handle| handle.abort());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helpers::CALLBACK_EXPIRATION_IN_SECS;
+    use crate::helpers::max_redundant_requests;
+
     use snarkos_node_bft_ledger_service::LedgerService;
     use snarkos_node_bft_storage_service::BFTMemoryService;
     use snarkvm::{
@@ -540,20 +281,11 @@ mod tests {
     use bytes::Bytes;
     use indexmap::IndexMap;
     use mockall::mock;
-    use std::{io, ops::Range};
+    use std::ops::Range;
 
     type CurrentNetwork = snarkvm::prelude::MainnetV0;
 
     const ITERATIONS: usize = 100;
-
-    mock! {
-        Gateway<N: Network> {}
-        #[async_trait]
-        impl<N:Network> Transport<N> for Gateway<N> {
-            fn broadcast(&self, event: Event<N>);
-            async fn send(&self, peer_ip: SocketAddr, event: Event<N>) -> Option<oneshot::Receiver<io::Result<()>>>;
-        }
-    }
 
     mock! {
         #[derive(Debug)]
@@ -627,95 +359,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_transmission() {
-        let rng = &mut TestRng::default();
-        // Sample a committee.
-        let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
-        let committee_clone = committee.clone();
-        // Setup the mock gateway and ledger.
-        let gateway = MockGateway::default();
-        let mut mock_ledger = MockLedger::default();
-        mock_ledger.expect_current_committee().returning(move || Ok(committee.clone()));
-        mock_ledger.expect_get_committee_lookback_for_round().returning(move |_| Ok(committee_clone.clone()));
-        mock_ledger.expect_contains_transmission().returning(|_| Ok(false));
-        mock_ledger.expect_check_solution_basic().returning(|_, _| Ok(()));
-        let ledger: Arc<dyn LedgerService<CurrentNetwork>> = Arc::new(mock_ledger);
-        // Initialize the storage.
-        let storage = Storage::<CurrentNetwork>::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 1);
-
-        // Create the Worker.
-        let worker = Worker::new(0, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
-        let data = |rng: &mut TestRng| Data::Buffer(Bytes::from((0..512).map(|_| rng.gen::<u8>()).collect::<Vec<_>>()));
-        let transmission_id = TransmissionID::Solution(
-            rng.gen::<u64>().into(),
-            rng.gen::<<CurrentNetwork as Network>::TransmissionChecksum>(),
-        );
-        let peer_ip = SocketAddr::from(([127, 0, 0, 1], 1234));
-        let transmission = Transmission::Solution(data(rng));
-
-        // Process the transmission.
-        worker.process_transmission_from_peer(peer_ip, transmission_id, transmission.clone());
-        assert!(worker.contains_transmission(transmission_id));
-        assert!(worker.ready.contains(transmission_id));
-        assert_eq!(worker.get_transmission(transmission_id), Some(transmission));
-        // Take the transmission from the ready set.
-        let transmission: Vec<_> = worker.drain(1).collect();
-        assert_eq!(transmission.len(), 1);
-        assert!(!worker.ready.contains(transmission_id));
-    }
-
-    #[tokio::test]
-    async fn test_send_transmission() {
-        let rng = &mut TestRng::default();
-        // Sample a committee.
-        let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
-        let committee_clone = committee.clone();
-        // Setup the mock gateway and ledger.
-        let mut gateway = MockGateway::default();
-        gateway.expect_send().returning(|_, _| {
-            let (_tx, rx) = oneshot::channel();
-            Some(rx)
-        });
-        let mut mock_ledger = MockLedger::default();
-        mock_ledger.expect_current_committee().returning(move || Ok(committee.clone()));
-        mock_ledger.expect_get_committee_lookback_for_round().returning(move |_| Ok(committee_clone.clone()));
-        mock_ledger.expect_ensure_transmission_is_well_formed().returning(|_, _| Ok(()));
-        let ledger: Arc<dyn LedgerService<CurrentNetwork>> = Arc::new(mock_ledger);
-        // Initialize the storage.
-        let storage = Storage::<CurrentNetwork>::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 1);
-
-        // Create the Worker.
-        let worker = Worker::new(0, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
-        let transmission_id = TransmissionID::Solution(
-            rng.gen::<u64>().into(),
-            rng.gen::<<CurrentNetwork as Network>::TransmissionChecksum>(),
-        );
-        let worker_ = worker.clone();
-        let peer_ip = SocketAddr::from(([127, 0, 0, 1], 1234));
-        let _ = worker_.send_transmission_request(peer_ip, transmission_id).await;
-        assert!(worker.pending.contains(transmission_id));
-        let peer_ip = SocketAddr::from(([127, 0, 0, 1], 1234));
-        // Fake the transmission response.
-        worker.finish_transmission_request(peer_ip, TransmissionResponse {
-            transmission_id,
-            transmission: Transmission::Solution(Data::Buffer(Bytes::from(vec![0; 512]))),
-        });
-        // Check the transmission was removed from the pending set.
-        assert!(!worker.pending.contains(transmission_id));
-    }
-
-    #[tokio::test]
     async fn test_process_solution_ok() {
         let rng = &mut TestRng::default();
         // Sample a committee.
         let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
         let committee_clone = committee.clone();
-        // Setup the mock gateway and ledger.
-        let mut gateway = MockGateway::default();
-        gateway.expect_send().returning(|_, _| {
-            let (_tx, rx) = oneshot::channel();
-            Some(rx)
-        });
+
         let mut mock_ledger = MockLedger::default();
         mock_ledger.expect_current_committee().returning(move || Ok(committee.clone()));
         mock_ledger.expect_get_committee_lookback_for_round().returning(move |_| Ok(committee_clone.clone()));
@@ -726,15 +375,11 @@ mod tests {
         let storage = Storage::<CurrentNetwork>::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 1);
 
         // Create the Worker.
-        let worker = Worker::new(0, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
+        let worker = Worker::new(0, storage, ledger, Default::default()).unwrap();
         let solution = Data::Buffer(Bytes::from((0..512).map(|_| rng.gen::<u8>()).collect::<Vec<_>>()));
         let solution_id = rng.gen::<u64>().into();
         let solution_checksum = solution.to_checksum::<CurrentNetwork>().unwrap();
         let transmission_id = TransmissionID::Solution(solution_id, solution_checksum);
-        let worker_ = worker.clone();
-        let peer_ip = SocketAddr::from(([127, 0, 0, 1], 1234));
-        let _ = worker_.send_transmission_request(peer_ip, transmission_id).await;
-        assert!(worker.pending.contains(transmission_id));
         let result = worker.process_unconfirmed_solution(solution_id, solution).await;
         assert!(result.is_ok());
         assert!(!worker.pending.contains(transmission_id));
@@ -747,12 +392,7 @@ mod tests {
         // Sample a committee.
         let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
         let committee_clone = committee.clone();
-        // Setup the mock gateway and ledger.
-        let mut gateway = MockGateway::default();
-        gateway.expect_send().returning(|_, _| {
-            let (_tx, rx) = oneshot::channel();
-            Some(rx)
-        });
+
         let mut mock_ledger = MockLedger::default();
         mock_ledger.expect_current_committee().returning(move || Ok(committee.clone()));
         mock_ledger.expect_get_committee_lookback_for_round().returning(move |_| Ok(committee_clone.clone()));
@@ -763,15 +403,11 @@ mod tests {
         let storage = Storage::<CurrentNetwork>::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 1);
 
         // Create the Worker.
-        let worker = Worker::new(0, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
+        let worker = Worker::new(0, storage, ledger, Default::default()).unwrap();
         let solution_id = rng.gen::<u64>().into();
         let solution = Data::Buffer(Bytes::from((0..512).map(|_| rng.gen::<u8>()).collect::<Vec<_>>()));
         let checksum = solution.to_checksum::<CurrentNetwork>().unwrap();
         let transmission_id = TransmissionID::Solution(solution_id, checksum);
-        let worker_ = worker.clone();
-        let peer_ip = SocketAddr::from(([127, 0, 0, 1], 1234));
-        let _ = worker_.send_transmission_request(peer_ip, transmission_id).await;
-        assert!(worker.pending.contains(transmission_id));
         let result = worker.process_unconfirmed_solution(solution_id, solution).await;
         assert!(result.is_err());
         assert!(!worker.pending.contains(transmission_id));
@@ -784,12 +420,7 @@ mod tests {
         // Sample a committee.
         let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
         let committee_clone = committee.clone();
-        // Setup the mock gateway and ledger.
-        let mut gateway = MockGateway::default();
-        gateway.expect_send().returning(|_, _| {
-            let (_tx, rx) = oneshot::channel();
-            Some(rx)
-        });
+
         let mut mock_ledger = MockLedger::default();
         mock_ledger.expect_current_committee().returning(move || Ok(committee.clone()));
         mock_ledger.expect_get_committee_lookback_for_round().returning(move |_| Ok(committee_clone.clone()));
@@ -800,15 +431,11 @@ mod tests {
         let storage = Storage::<CurrentNetwork>::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 1);
 
         // Create the Worker.
-        let worker = Worker::new(0, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
+        let worker = Worker::new(0, storage, ledger, Default::default()).unwrap();
         let transaction_id: <CurrentNetwork as Network>::TransactionID = Field::<CurrentNetwork>::rand(&mut rng).into();
         let transaction = Data::Buffer(Bytes::from((0..512).map(|_| rng.gen::<u8>()).collect::<Vec<_>>()));
         let checksum = transaction.to_checksum::<CurrentNetwork>().unwrap();
         let transmission_id = TransmissionID::Transaction(transaction_id, checksum);
-        let worker_ = worker.clone();
-        let peer_ip = SocketAddr::from(([127, 0, 0, 1], 1234));
-        let _ = worker_.send_transmission_request(peer_ip, transmission_id).await;
-        assert!(worker.pending.contains(transmission_id));
         let result = worker.process_unconfirmed_transaction(transaction_id, transaction).await;
         assert!(result.is_ok());
         assert!(!worker.pending.contains(transmission_id));
@@ -821,12 +448,7 @@ mod tests {
         // Sample a committee.
         let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
         let committee_clone = committee.clone();
-        // Setup the mock gateway and ledger.
-        let mut gateway = MockGateway::default();
-        gateway.expect_send().returning(|_, _| {
-            let (_tx, rx) = oneshot::channel();
-            Some(rx)
-        });
+
         let mut mock_ledger = MockLedger::default();
         mock_ledger.expect_current_committee().returning(move || Ok(committee.clone()));
         mock_ledger.expect_get_committee_lookback_for_round().returning(move |_| Ok(committee_clone.clone()));
@@ -837,98 +459,15 @@ mod tests {
         let storage = Storage::<CurrentNetwork>::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 1);
 
         // Create the Worker.
-        let worker = Worker::new(0, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
+        let worker = Worker::new(0, storage, ledger, Default::default()).unwrap();
         let transaction_id: <CurrentNetwork as Network>::TransactionID = Field::<CurrentNetwork>::rand(&mut rng).into();
         let transaction = Data::Buffer(Bytes::from((0..512).map(|_| rng.gen::<u8>()).collect::<Vec<_>>()));
         let checksum = transaction.to_checksum::<CurrentNetwork>().unwrap();
         let transmission_id = TransmissionID::Transaction(transaction_id, checksum);
-        let worker_ = worker.clone();
-        let peer_ip = SocketAddr::from(([127, 0, 0, 1], 1234));
-        let _ = worker_.send_transmission_request(peer_ip, transmission_id).await;
-        assert!(worker.pending.contains(transmission_id));
         let result = worker.process_unconfirmed_transaction(transaction_id, transaction).await;
         assert!(result.is_err());
         assert!(!worker.pending.contains(transmission_id));
         assert!(!worker.ready.contains(transmission_id));
-    }
-
-    #[tokio::test]
-    async fn test_flood_transmission_requests() {
-        let mut rng = &mut TestRng::default();
-        // Sample a committee.
-        let committee = snarkvm::ledger::committee::test_helpers::sample_committee(rng);
-        let committee_clone = committee.clone();
-        // Setup the mock gateway and ledger.
-        let mut gateway = MockGateway::default();
-        gateway.expect_send().returning(|_, _| {
-            let (_tx, rx) = oneshot::channel();
-            Some(rx)
-        });
-        let mut mock_ledger = MockLedger::default();
-        mock_ledger.expect_current_committee().returning(move || Ok(committee.clone()));
-        mock_ledger.expect_get_committee_lookback_for_round().returning(move |_| Ok(committee_clone.clone()));
-        mock_ledger.expect_contains_transmission().returning(|_| Ok(false));
-        mock_ledger.expect_check_transaction_basic().returning(|_, _| Ok(()));
-        let ledger: Arc<dyn LedgerService<CurrentNetwork>> = Arc::new(mock_ledger);
-        // Initialize the storage.
-        let storage = Storage::<CurrentNetwork>::new(ledger.clone(), Arc::new(BFTMemoryService::new()), 1);
-
-        // Create the Worker.
-        let worker = Worker::new(0, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
-        let transaction_id: <CurrentNetwork as Network>::TransactionID = Field::<CurrentNetwork>::rand(&mut rng).into();
-        let transaction = Data::Buffer(Bytes::from((0..512).map(|_| rng.gen::<u8>()).collect::<Vec<_>>()));
-        let checksum = transaction.to_checksum::<CurrentNetwork>().unwrap();
-        let transmission_id = TransmissionID::Transaction(transaction_id, checksum);
-
-        // Determine the number of redundant requests are sent.
-        let num_redundant_requests = max_redundant_requests(worker.ledger.clone(), worker.storage.current_round());
-        let num_flood_requests = num_redundant_requests * 10;
-        let mut peer_ips =
-            (0..num_flood_requests).map(|i| SocketAddr::from(([127, 0, 0, 1], 1234 + i as u16))).collect_vec();
-        let first_peer_ip = peer_ips[0];
-
-        // Flood the pending queue with transmission requests.
-        for i in 1..=num_flood_requests {
-            let worker_ = worker.clone();
-            let peer_ip = peer_ips.pop().unwrap();
-            tokio::spawn(async move {
-                let _ = worker_.send_transmission_request(peer_ip, transmission_id).await;
-            });
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            // Check that the number of sent requests does not exceed the maximum number of redundant requests.
-            assert!(worker.pending.num_sent_requests(transmission_id) <= num_redundant_requests);
-            assert_eq!(worker.pending.num_callbacks(transmission_id), i);
-        }
-        // Check that the number of sent requests does not exceed the maximum number of redundant requests.
-        assert_eq!(worker.pending.num_sent_requests(transmission_id), num_redundant_requests);
-        assert_eq!(worker.pending.num_callbacks(transmission_id), num_flood_requests);
-
-        // Let all the requests expire.
-        tokio::time::sleep(Duration::from_secs(CALLBACK_EXPIRATION_IN_SECS as u64 + 1)).await;
-        assert_eq!(worker.pending.num_sent_requests(transmission_id), 0);
-        assert_eq!(worker.pending.num_callbacks(transmission_id), 0);
-
-        // Flood the pending queue with transmission requests again, this time to a single peer
-        for i in 1..=num_flood_requests {
-            let worker_ = worker.clone();
-            tokio::spawn(async move {
-                let _ = worker_.send_transmission_request(first_peer_ip, transmission_id).await;
-            });
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            assert!(worker.pending.num_sent_requests(transmission_id) <= num_redundant_requests);
-            assert_eq!(worker.pending.num_callbacks(transmission_id), i);
-        }
-        // Check that the number of sent requests does not exceed the maximum number of redundant requests.
-        assert_eq!(worker.pending.num_sent_requests(transmission_id), 1);
-        assert_eq!(worker.pending.num_callbacks(transmission_id), num_flood_requests);
-
-        // Check that fulfilling a transmission request clears the pending queue.
-        let result = worker.process_unconfirmed_transaction(transaction_id, transaction).await;
-        assert!(result.is_ok());
-        assert_eq!(worker.pending.num_sent_requests(transmission_id), 0);
-        assert_eq!(worker.pending.num_callbacks(transmission_id), 0);
-        assert!(!worker.pending.contains(transmission_id));
-        assert!(worker.ready.contains(transmission_id));
     }
 
     #[tokio::test]
@@ -945,7 +484,6 @@ mod tests {
             let committee =
                 snarkvm::ledger::committee::test_helpers::sample_committee_for_round(latest_ledger_round, rng);
 
-            // Setup the mock gateway and ledger.
             let mut mock_ledger = MockLedger::default();
             mock_ledger.expect_current_committee().returning(move || Ok(committee.clone()));
 
@@ -963,7 +501,6 @@ mod tests {
 #[cfg(test)]
 mod prop_tests {
     use super::*;
-    use crate::Gateway;
     use snarkos_node_bft_ledger_service::MockLedgerService;
     use snarkvm::{
         console::account::Address,
@@ -989,26 +526,18 @@ mod prop_tests {
     }
 
     #[proptest]
-    fn worker_initialization(
-        #[strategy(0..MAX_WORKERS)] id: u8,
-        gateway: Gateway<CurrentNetwork>,
-        storage: Storage<CurrentNetwork>,
-    ) {
+    fn worker_initialization(#[strategy(0..MAX_WORKERS)] id: u8, storage: Storage<CurrentNetwork>) {
         let committee = new_test_committee(4);
         let ledger: Arc<dyn LedgerService<CurrentNetwork>> = Arc::new(MockLedgerService::new(committee));
-        let worker = Worker::new(id, Arc::new(gateway), storage, ledger, Default::default()).unwrap();
+        let worker = Worker::new(id, storage, ledger, Default::default()).unwrap();
         assert_eq!(worker.id(), id);
     }
 
     #[proptest]
-    fn invalid_worker_id(
-        #[strategy(MAX_WORKERS..)] id: u8,
-        gateway: Gateway<CurrentNetwork>,
-        storage: Storage<CurrentNetwork>,
-    ) {
+    fn invalid_worker_id(#[strategy(MAX_WORKERS..)] id: u8, storage: Storage<CurrentNetwork>) {
         let committee = new_test_committee(4);
         let ledger: Arc<dyn LedgerService<CurrentNetwork>> = Arc::new(MockLedgerService::new(committee));
-        let worker = Worker::new(id, Arc::new(gateway), storage, ledger, Default::default());
+        let worker = Worker::new(id, storage, ledger, Default::default());
         // TODO once Worker implements Debug, simplify this with `unwrap_err`
         if let Err(error) = worker {
             assert_eq!(error.to_string(), format!("Invalid worker ID '{}'", id));

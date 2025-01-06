@@ -57,7 +57,7 @@ async fn test_resend_transmission_request() {
 
     // Send a request to fetch the dummy transmission.
     let worker_ = worker.clone();
-    tokio::spawn(async move { worker_.get_or_fetch_transmission(initial_peer_ip, transmission_id).await });
+    tokio::spawn(async move { worker_.get_or_fetch_transmission(transmission_id).await });
 
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
@@ -76,7 +76,7 @@ async fn test_resend_transmission_request() {
     for i in 1..num_test_requests {
         let worker_ = worker.clone();
         let peer_ip = initial_peer_ip;
-        tokio::spawn(async move { worker_.get_or_fetch_transmission(peer_ip, transmission_id).await });
+        tokio::spawn(async move { worker_.get_or_fetch_transmission(transmission_id).await });
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
@@ -95,7 +95,7 @@ async fn test_resend_transmission_request() {
     for i in 1..num_test_requests {
         let peer_ip = peer_ips.pop().unwrap();
         let worker_ = worker.clone();
-        tokio::spawn(async move { worker_.get_or_fetch_transmission(peer_ip, transmission_id).await });
+        tokio::spawn(async move { worker_.get_or_fetch_transmission(transmission_id).await });
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
@@ -139,9 +139,9 @@ async fn test_flood_transmission_requests() {
     assert!(!worker.contains_transmission(transmission_id), "Transmission should not exist");
 
     // Send the maximum number of redundant requests to fetch the dummy transmission.
-    for peer_ip in remaining_peer_ips.clone() {
+    for _ in remaining_peer_ips.clone() {
         let worker_ = worker.clone();
-        tokio::spawn(async move { worker_.get_or_fetch_transmission(peer_ip, transmission_id).await });
+        tokio::spawn(async move { worker_.get_or_fetch_transmission(transmission_id).await });
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -160,7 +160,7 @@ async fn test_flood_transmission_requests() {
     for i in 1..=20 {
         let worker_ = worker.clone();
         let peer_ip = initial_peer_ip;
-        tokio::spawn(async move { worker_.get_or_fetch_transmission(peer_ip, transmission_id).await });
+        tokio::spawn(async move { worker_.get_or_fetch_transmission(transmission_id).await });
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
@@ -179,7 +179,7 @@ async fn test_flood_transmission_requests() {
     for i in 1..=20 {
         let worker_ = worker.clone();
         let peer_ip = remaining_peer_ips.pop().unwrap();
-        tokio::spawn(async move { worker_.get_or_fetch_transmission(peer_ip, transmission_id).await });
+        tokio::spawn(async move { worker_.get_or_fetch_transmission(transmission_id).await });
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 

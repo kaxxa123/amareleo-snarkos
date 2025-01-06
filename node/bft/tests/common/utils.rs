@@ -227,9 +227,9 @@ pub fn sample_worker<N: Network>(
     // Sample a storage.
     let storage = sample_storage(ledger.clone());
     // Sample a gateway.
-    let gateway = sample_gateway(account, storage.clone(), ledger.clone());
+    let _gateway = sample_gateway(account, storage.clone(), ledger.clone());
     // Sample a dummy proposed batch.
     let proposed_batch = Arc::new(RwLock::new(None));
     // Construct the worker instance.
-    Worker::new(id, Arc::new(gateway.clone()), storage.clone(), ledger, proposed_batch).unwrap()
+    Worker::new(id, storage.clone(), ledger, proposed_batch).unwrap()
 }

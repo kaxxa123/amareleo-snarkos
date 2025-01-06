@@ -1628,14 +1628,10 @@ mod prop_tests {
             // Initialize the workers.
             for id in 0..workers_count {
                 // Construct the worker channels.
-                let (tx_worker, rx_worker) = init_worker_channels();
+                let (tx_worker, _) = init_worker_channels();
                 // Construct the worker instance.
                 let ledger = Arc::new(MockLedgerService::new(committee.clone()));
-                let worker =
-                    Worker::new(id, Arc::new(gateway.clone()), worker_storage.clone(), ledger, Default::default())
-                        .unwrap();
-                // Run the worker instance.
-                worker.run(rx_worker);
+                let worker = Worker::new(id, worker_storage.clone(), ledger, Default::default()).unwrap();
 
                 // Add the worker and the worker sender to maps
                 workers.insert(id, worker);

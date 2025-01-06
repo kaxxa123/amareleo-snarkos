@@ -21,7 +21,6 @@ use crate::{
     PRIMARY_PING_IN_MS,
     Sync,
     Transport,
-    WORKER_PING_IN_MS,
     Worker,
     events::Event,
     helpers::{
@@ -55,8 +54,7 @@ use snarkvm::{
         narwhal::{BatchCertificate, BatchHeader, Data, Transmission, TransmissionID},
         puzzle::{Solution, SolutionID},
     },
-    prelude::committee::Committee,
-    prelude::Signature,
+    prelude::{Signature, committee::Committee},
 };
 
 use colored::Colorize;
@@ -65,8 +63,8 @@ use indexmap::{IndexMap, IndexSet};
 use parking_lot::{Mutex, RwLock};
 
 // AlexZ: Needed for Validator to forge signatures.
-use rand_chacha::ChaChaRng;
 use rand::SeedableRng;
+use rand_chacha::ChaChaRng;
 use snarkvm::console::account::PrivateKey;
 
 use std::{
@@ -206,17 +204,10 @@ impl<N: Network> Primary<N> {
         // Initialize the workers.
         for id in 0..MAX_WORKERS {
             // Construct the worker channels.
-            let (tx_worker, rx_worker) = init_worker_channels();
+            let (tx_worker, _) = init_worker_channels();
             // Construct the worker instance.
-            let worker = Worker::new(
-                id,
-                Arc::new(self.gateway.clone()),
-                self.storage.clone(),
-                self.ledger.clone(),
-                self.proposed_batch.clone(),
-            )?;
-            // Run the worker instance.
-            worker.run(rx_worker);
+            let worker = Worker::new(id, self.storage.clone(), self.ledger.clone(), self.proposed_batch.clone())?;
+
             // Add the worker to the list of workers.
             workers.push(worker);
             // Add the worker sender to the map.
@@ -335,8 +326,7 @@ impl<N: Network> Primary<N> {
 }
 
 impl<N: Network> Primary<N> {
-    pub async fn propose_batch(&self) -> Result<()> { 
-       
+    pub async fn propose_batch(&self) -> Result<()> {
         let mut rng = ChaChaRng::seed_from_u64(1234567890u64);
         let mut all_acc: Vec<Account<N>> = Vec::new();
 
@@ -358,7 +348,8 @@ impl<N: Network> Primary<N> {
         // Submit empty proposals for other validators
         for vid in 1..all_acc.len() {
             let primary_acc = &all_acc[vid];
-            let other_acc: Vec<&Account<N>> = all_acc.iter().filter(|acc| acc.address() != primary_acc.address()).collect();
+            let other_acc: Vec<&Account<N>> =
+                all_acc.iter().filter(|acc| acc.address() != primary_acc.address()).collect();
 
             self.fake_proposal(vid.try_into().unwrap(), primary_acc, &other_acc, round).await?;
         }
@@ -427,9 +418,8 @@ impl<N: Network> Primary<N> {
         // Check if the primary is connected to enough validators to reach quorum threshold.
         {
             // Retrieve the connected validator addresses.
-            let mut connected_validators: HashSet<Address<N>> = 
-                other_acc.iter().map(|acc| acc.address()).collect();
-            
+            let mut connected_validators: HashSet<Address<N>> = other_acc.iter().map(|acc| acc.address()).collect();
+
             // Append the primary to the set.
             connected_validators.insert(self.gateway.account().address());
 
@@ -599,7 +589,7 @@ impl<N: Network> Primary<N> {
         self.gateway.broadcast(Event::BatchPropose(batch_header.clone().into()));
         // Set the timestamp of the latest proposed batch.
         *self.latest_proposed_batch_timestamp.write() = proposal.timestamp();
-        
+
         // // Set the proposed batch.
         // *self.proposed_batch.write() = Some(proposal);
 
@@ -635,20 +625,26 @@ impl<N: Network> Primary<N> {
         Ok(round)
     }
 
-    pub async fn fake_proposal(&self, vid: u64, primary_acc: &Account<N>, other_acc: &[&Account<N>], round : u64) -> Result<()> {
+    pub async fn fake_proposal(
+        &self,
+        vid: u64,
+        primary_acc: &Account<N>,
+        other_acc: &[&Account<N>],
+        round: u64,
+    ) -> Result<()> {
         let transmissions: IndexMap<_, _> = Default::default();
         let transmission_ids = transmissions.keys().copied().collect();
-    
+
         let private_key = *primary_acc.private_key();
         let current_timestamp = now();
-    
+
         let committee_lookback = self.ledger.get_committee_lookback_for_round(round)?;
         let committee_id = committee_lookback.id();
-    
+
         let previous_round = round.saturating_sub(1);
         let previous_certificates = self.storage.get_certificates_for_round(previous_round);
         let previous_certificate_ids = previous_certificates.into_iter().map(|c| c.id()).collect();
-    
+
         let (batch_header, mut proposal) = spawn_blocking!(BatchHeader::new(
             &private_key,
             round,
@@ -689,7 +685,8 @@ impl<N: Network> Primary<N> {
         };
 
         // Create the batch certificate and transmissions.
-        let (certificate, transmissions) = tokio::task::block_in_place(|| proposal.to_certificate(&committee_lookback))?;
+        let (certificate, transmissions) =
+            tokio::task::block_in_place(|| proposal.to_certificate(&committee_lookback))?;
 
         // Convert the transmissions into a HashMap.
         // Note: Do not change the `Proposal` to use a HashMap. The ordering there is necessary for safety.
@@ -731,7 +728,6 @@ impl<N: Network> Primary<N> {
 
         Ok(())
     }
-
 }
 
 impl<N: Network> Primary<N> {
@@ -800,25 +796,6 @@ impl<N: Network> Primary<N> {
                     let primary_ping = PrimaryPing::from((<Event<N>>::VERSION, block_locators, primary_certificate));
                     // Broadcast the event.
                     self_.gateway.broadcast(Event::PrimaryPing(primary_ping));
-                }
-            });
-        }
-
-        // Start the worker ping(s).
-        if self.sync.is_gateway_mode() {
-            let self_ = self.clone();
-            self.spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_millis(WORKER_PING_IN_MS)).await;
-                    // If the primary is not synced, then do not broadcast the worker ping(s).
-                    if !self_.sync.is_synced() {
-                        trace!("Skipping worker ping(s) {}", "(node is syncing)".dimmed());
-                        continue;
-                    }
-                    // Broadcast the worker ping(s).
-                    for worker in self_.workers.iter() {
-                        worker.broadcast_ping();
-                    }
                 }
             });
         }
@@ -1051,7 +1028,7 @@ impl<N: Network> Primary<N> {
             // Ensure that the previous certificate was created at least `MIN_BATCH_DELAY_IN_MS` seconds ago.
             Some(certificate) => certificate.timestamp(),
 
-            // AlexZ: Function was handling special case for: self.gateway.account().address() == author 
+            // AlexZ: Function was handling special case for: self.gateway.account().address() == author
             //        Short-circuited to case when this is true.
             None => *self.latest_proposed_batch_timestamp.read(),
         };
@@ -1068,7 +1045,11 @@ impl<N: Network> Primary<N> {
     }
 
     /// Stores the certified batch and broadcasts it to all validators, returning the certificate.
-    async fn store_and_broadcast_certificate_lite(&self, proposal: &Proposal<N>, committee: &Committee<N>) -> Result<()> {
+    async fn store_and_broadcast_certificate_lite(
+        &self,
+        proposal: &Proposal<N>,
+        committee: &Committee<N>,
+    ) -> Result<()> {
         // Create the batch certificate and transmissions.
         let (certificate, transmissions) = tokio::task::block_in_place(|| proposal.to_certificate(committee))?;
         // Convert the transmissions into a HashMap.
@@ -1216,7 +1197,7 @@ impl<N: Network> Primary<N> {
             })?;
 
         // Ensure the primary has all of the transmissions.
-        let missing_transmissions = self.fetch_missing_transmissions(peer_ip, batch_header).await.map_err(|e| {
+        let missing_transmissions = self.fetch_missing_transmissions(batch_header).await.map_err(|e| {
             anyhow!("Failed to fetch missing transmissions for round {batch_round} from '{peer_ip}' - {e}")
         })?;
 
@@ -1232,7 +1213,6 @@ impl<N: Network> Primary<N> {
     /// If a transmission does not exist, it will be fetched from the specified peer IP.
     async fn fetch_missing_transmissions(
         &self,
-        peer_ip: SocketAddr,
         batch_header: &BatchHeader<N>,
     ) -> Result<HashMap<TransmissionID<N>, Transmission<N>>> {
         // If the round is <= the GC round, return early.
@@ -1265,7 +1245,7 @@ impl<N: Network> Primary<N> {
                 // Retrieve the worker.
                 let Some(worker) = workers.get(worker_id as usize) else { bail!("Unable to find worker {worker_id}") };
                 // Push the callback onto the list.
-                fetch_transmissions.push(worker.get_or_fetch_transmission(peer_ip, *transmission_id));
+                fetch_transmissions.push(worker.get_or_fetch_transmission(*transmission_id));
             }
         }
 
@@ -1362,8 +1342,6 @@ impl<N: Network> Primary<N> {
     /// Shuts down the primary.
     pub async fn shut_down(&self) {
         info!("Shutting down the primary...");
-        // Shut down the workers.
-        self.workers.iter().for_each(|worker| worker.shut_down());
         // Abort the tasks.
         self.handles.lock().iter().for_each(|handle| handle.abort());
         // Save the current proposal cache to disk.
@@ -1381,4 +1359,3 @@ impl<N: Network> Primary<N> {
         self.gateway.shut_down().await;
     }
 }
-
