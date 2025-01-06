@@ -55,25 +55,25 @@ Options:
 To start 4 **BFT** nodes manually, run:
 ```bash
 # Terminal 1
-cargo run --release --example simple_node --mode bft --id 0 --num-nodes 4 --fire-transmissions
+cargo run --release --example simple_node -- --mode bft --id 0 --num-nodes 4 --fire-transmissions
 # Terminal 2
-cargo run --release --example simple_node --mode bft --id 1 --num-nodes 4 --fire-transmissions
+cargo run --release --example simple_node -- --mode bft --id 1 --num-nodes 4 --fire-transmissions
 # Terminal 3
-cargo run --release --example simple_node --mode bft --id 2 --num-nodes 4 --fire-transmissions
+cargo run --release --example simple_node -- --mode bft --id 2 --num-nodes 4 --fire-transmissions
 # Terminal 4
-cargo run --release --example simple_node --mode bft --id 3 --num-nodes 4 --fire-transmissions
+cargo run --release --example simple_node -- --mode bft --id 3 --num-nodes 4 --fire-transmissions
 ```
 
 To start 4 **Narwhal** nodes manually, run:
 ```bash
 # Terminal 1
-cargo run --release --example simple_node --mode narwhal --id 0 --num-nodes 4 --fire-transmissions
+cargo run --release --example simple_node -- --mode narwhal --id 0 --num-nodes 4 --fire-transmissions
 # Terminal 2
-cargo run --release --example simple_node --mode narwhal --id 1 --num-nodes 4 --fire-transmissions
+cargo run --release --example simple_node -- --mode narwhal --id 1 --num-nodes 4 --fire-transmissions
 # Terminal 3
-cargo run --release --example simple_node --mode narwhal --id 2 --num-nodes 4 --fire-transmissions
+cargo run --release --example simple_node -- --mode narwhal --id 2 --num-nodes 4 --fire-transmissions
 # Terminal 4
-cargo run --release --example simple_node --mode narwhal --id 3 --num-nodes 4 --fire-transmissions
+cargo run --release --example simple_node -- --mode narwhal --id 3 --num-nodes 4 --fire-transmissions
 ```
 
 These initialize 4 nodes, and tells each node that there are 4 validators in the committee.
