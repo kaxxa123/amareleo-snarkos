@@ -734,7 +734,7 @@ impl<N: Network> Primary<N> {
                 // Sleep briefly, but longer than if there were no batch.
                 tokio::time::sleep(Duration::from_millis(MAX_BATCH_DELAY_IN_MS)).await;
                 // If the primary is not synced, then do not propose a batch.
-                if !self_.sync.is_synced() {
+                if !self_.is_synced() {
                     debug!("Skipping batch proposal {}", "(node is syncing)".dimmed());
                     continue;
                 }
@@ -762,7 +762,7 @@ impl<N: Network> Primary<N> {
                 // Sleep briefly.
                 tokio::time::sleep(Duration::from_millis(MAX_BATCH_DELAY_IN_MS)).await;
                 // If the primary is not synced, then do not increment to the next round.
-                if !self_.sync.is_synced() {
+                if !self_.is_synced() {
                     trace!("Skipping round increment {}", "(node is syncing)".dimmed());
                     continue;
                 }
@@ -1115,22 +1115,11 @@ impl<N: Network> Primary<N> {
             self.try_increment_to_the_next_round(batch_round).await?;
         }
 
-        // Ensure the primary has all of the previous certificates.
-        let missing_previous_certificates =
-            self.fetch_missing_previous_certificates(peer_ip, batch_header).await.map_err(|e| {
-                anyhow!("Failed to fetch missing previous certificates for round {batch_round} from '{peer_ip}' - {e}")
-            })?;
-
         // Ensure the primary has all of the transmissions.
         let missing_transmissions = self.fetch_missing_transmissions(batch_header).await.map_err(|e| {
             anyhow!("Failed to fetch missing transmissions for round {batch_round} from '{peer_ip}' - {e}")
         })?;
 
-        // Iterate through the missing previous certificates.
-        for batch_certificate in missing_previous_certificates {
-            // Store the batch certificate (recursively fetching any missing previous certificates).
-            self.sync_with_certificate_from_peer::<IS_SYNCING>(peer_ip, batch_certificate).await?;
-        }
         Ok(missing_transmissions)
     }
 
@@ -1185,76 +1174,6 @@ impl<N: Network> Primary<N> {
         }
         // Return the transmissions.
         Ok(transmissions)
-    }
-
-    /// Fetches any missing previous certificates for the specified batch header from the specified peer.
-    async fn fetch_missing_previous_certificates(
-        &self,
-        peer_ip: SocketAddr,
-        batch_header: &BatchHeader<N>,
-    ) -> Result<HashSet<BatchCertificate<N>>> {
-        // Retrieve the round.
-        let round = batch_header.round();
-        // If the previous round is 0, or is <= the GC round, return early.
-        if round == 1 || round <= self.storage.gc_round() + 1 {
-            return Ok(Default::default());
-        }
-
-        // Fetch the missing previous certificates.
-        let missing_previous_certificates =
-            self.fetch_missing_certificates(peer_ip, round, batch_header.previous_certificate_ids()).await?;
-        if !missing_previous_certificates.is_empty() {
-            debug!(
-                "Fetched {} missing previous certificates for round {round} from '{peer_ip}'",
-                missing_previous_certificates.len(),
-            );
-        }
-        // Return the missing previous certificates.
-        Ok(missing_previous_certificates)
-    }
-
-    /// Fetches any missing certificates for the specified batch header from the specified peer.
-    async fn fetch_missing_certificates(
-        &self,
-        peer_ip: SocketAddr,
-        round: u64,
-        certificate_ids: &IndexSet<Field<N>>,
-    ) -> Result<HashSet<BatchCertificate<N>>> {
-        // Initialize a list for the missing certificates.
-        let mut fetch_certificates = FuturesUnordered::new();
-        // Iterate through the certificate IDs.
-        for certificate_id in certificate_ids {
-            // Check if the certificate already exists in the ledger.
-            if self.ledger.contains_certificate(certificate_id)? {
-                continue;
-            }
-            // If we do not have the certificate, request it.
-            if !self.storage.contains_certificate(*certificate_id) {
-                trace!("Primary - Found a new certificate ID for round {round} from '{peer_ip}'");
-                // TODO (howardwu): Limit the number of open requests we send to a peer.
-                // Send an certificate request to the peer.
-                fetch_certificates.push(self.sync.send_certificate_request(peer_ip, *certificate_id));
-            }
-        }
-
-        // If there are no missing certificates, return early.
-        match fetch_certificates.is_empty() {
-            true => return Ok(Default::default()),
-            false => trace!(
-                "Fetching {} missing certificates for round {round} from '{peer_ip}'...",
-                fetch_certificates.len(),
-            ),
-        }
-
-        // Initialize a set for the missing certificates.
-        let mut missing_certificates = HashSet::with_capacity(fetch_certificates.len());
-        // Wait for all of the missing certificates to be fetched.
-        while let Some(result) = fetch_certificates.next().await {
-            // Insert the missing certificate into the set.
-            missing_certificates.insert(result?);
-        }
-        // Return the missing certificates.
-        Ok(missing_certificates)
     }
 }
 
