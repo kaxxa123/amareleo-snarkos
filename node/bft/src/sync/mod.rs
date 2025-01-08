@@ -17,11 +17,9 @@ use crate::{
     Gateway,
     MAX_FETCH_TIMEOUT_IN_MS,
     PRIMARY_PING_IN_MS,
-    Transport,
-    helpers::{BFTSender, Pending, Storage, SyncReceiver, fmt_id, max_redundant_requests},
+    helpers::{BFTSender, Pending, Storage},
     spawn_blocking,
 };
-use snarkos_node_bft_events::{CertificateRequest, CertificateResponse, Event};
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_sync::{BlockSync, BlockSyncMode, locators::BlockLocators};
 use snarkos_node_tcp::P2P;
@@ -34,9 +32,9 @@ use snarkvm::{
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
 use rayon::prelude::*;
-use std::{collections::HashMap, future::Future, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 use tokio::{
-    sync::{Mutex as TMutex, OnceCell, oneshot},
+    sync::{Mutex as TMutex, OnceCell},
     task::JoinHandle,
 };
 
@@ -98,7 +96,7 @@ impl<N: Network> Sync<N> {
     }
 
     /// Starts the sync module.
-    pub async fn run(&self, sync_receiver: SyncReceiver<N>) -> Result<()> {
+    pub async fn run(&self) -> Result<()> {
         info!("Starting the sync module...");
 
         // Start the block sync loop.
@@ -142,76 +140,6 @@ impl<N: Network> Sync<N> {
                     self__.pending.clear_expired_callbacks();
                     Ok(())
                 });
-            }
-        });
-
-        // Retrieve the sync receiver.
-        let SyncReceiver {
-            mut rx_block_sync_advance_with_sync_blocks,
-            mut rx_block_sync_remove_peer,
-            mut rx_block_sync_update_peer_locators,
-            mut rx_certificate_request,
-            mut rx_certificate_response,
-        } = sync_receiver;
-
-        // Process the block sync request to advance with sync blocks.
-        let self_ = self.clone();
-        self.spawn(async move {
-            while let Some((peer_ip, blocks, callback)) = rx_block_sync_advance_with_sync_blocks.recv().await {
-                // Process the block response.
-                if let Err(e) = self_.block_sync.process_block_response(peer_ip, blocks) {
-                    // Send the error to the callback.
-                    callback.send(Err(e)).ok();
-                    continue;
-                }
-
-                // Sync the storage with the blocks.
-                if let Err(e) = self_.sync_storage_with_blocks().await {
-                    // Send the error to the callback.
-                    callback.send(Err(e)).ok();
-                    continue;
-                }
-
-                // Send the result to the callback.
-                callback.send(Ok(())).ok();
-            }
-        });
-
-        // Process the block sync request to remove the peer.
-        let self_ = self.clone();
-        self.spawn(async move {
-            while let Some(peer_ip) = rx_block_sync_remove_peer.recv().await {
-                self_.block_sync.remove_peer(&peer_ip);
-            }
-        });
-
-        // Process the block sync request to update peer locators.
-        let self_ = self.clone();
-        self.spawn(async move {
-            while let Some((peer_ip, locators, callback)) = rx_block_sync_update_peer_locators.recv().await {
-                let self_clone = self_.clone();
-                tokio::spawn(async move {
-                    // Update the peer locators.
-                    let result = self_clone.block_sync.update_peer_locators(peer_ip, locators);
-                    // Send the result to the callback.
-                    callback.send(result).ok();
-                });
-            }
-        });
-
-        // Process the certificate request.
-        let self_ = self.clone();
-        self.spawn(async move {
-            while let Some((peer_ip, certificate_request)) = rx_certificate_request.recv().await {
-                self_.send_certificate_response(peer_ip, certificate_request);
-            }
-        });
-
-        // Process the certificate response.
-        let self_ = self.clone();
-        self.spawn(async move {
-            while let Some((peer_ip, certificate_response)) = rx_certificate_response.recv().await {
-                self_.finish_certificate_request(peer_ip, certificate_response)
             }
         });
 
@@ -565,77 +493,6 @@ impl<N: Network> Sync<N> {
     #[doc(hidden)]
     pub(super) fn block_sync(&self) -> &BlockSync<N> {
         &self.block_sync
-    }
-}
-
-// Methods to assist with fetching batch certificates from peers.
-impl<N: Network> Sync<N> {
-    /// Sends a certificate request to the specified peer.
-    pub async fn send_certificate_request(
-        &self,
-        peer_ip: SocketAddr,
-        certificate_id: Field<N>,
-    ) -> Result<BatchCertificate<N>> {
-        // Initialize a oneshot channel.
-        let (callback_sender, callback_receiver) = oneshot::channel();
-        // Determine how many sent requests are pending.
-        let num_sent_requests = self.pending.num_sent_requests(certificate_id);
-        // Determine if we've already sent a request to the peer.
-        let contains_peer_with_sent_request = self.pending.contains_peer_with_sent_request(certificate_id, peer_ip);
-        // Determine the maximum number of redundant requests.
-        let num_redundant_requests = max_redundant_requests(self.ledger.clone(), self.storage.current_round());
-        // Determine if we should send a certificate request to the peer.
-        // We send at most `num_redundant_requests` requests and each peer can only receive one request at a time.
-        let should_send_request = num_sent_requests < num_redundant_requests && !contains_peer_with_sent_request;
-
-        // Insert the certificate ID into the pending queue.
-        self.pending.insert(certificate_id, peer_ip, Some((callback_sender, should_send_request)));
-
-        // If the number of requests is less than or equal to the redundancy factor, send the certificate request to the peer.
-        if should_send_request {
-            // Send the certificate request to the peer.
-            if self.gateway.send(peer_ip, Event::CertificateRequest(certificate_id.into())).await.is_none() {
-                bail!("Unable to fetch batch certificate {certificate_id} - failed to send request")
-            }
-        } else {
-            debug!(
-                "Skipped sending request for certificate {} to '{peer_ip}' ({num_sent_requests} redundant requests)",
-                fmt_id(certificate_id)
-            );
-        }
-        // Wait for the certificate to be fetched.
-        match tokio::time::timeout(Duration::from_millis(MAX_FETCH_TIMEOUT_IN_MS), callback_receiver).await {
-            // If the certificate was fetched, return it.
-            Ok(result) => Ok(result?),
-            // If the certificate was not fetched, return an error.
-            Err(e) => bail!("Unable to fetch certificate {} - (timeout) {e}", fmt_id(certificate_id)),
-        }
-    }
-
-    /// Handles the incoming certificate request.
-    fn send_certificate_response(&self, peer_ip: SocketAddr, request: CertificateRequest<N>) {
-        // Attempt to retrieve the certificate.
-        if let Some(certificate) = self.storage.get_certificate(request.certificate_id) {
-            // Send the certificate response to the peer.
-            let self_ = self.clone();
-            tokio::spawn(async move {
-                let _ = self_.gateway.send(peer_ip, Event::CertificateResponse(certificate.into())).await;
-            });
-        }
-    }
-
-    /// Handles the incoming certificate response.
-    /// This method ensures the certificate response is well-formed and matches the certificate ID.
-    fn finish_certificate_request(&self, peer_ip: SocketAddr, response: CertificateResponse<N>) {
-        let certificate = response.certificate;
-        // Check if the peer IP exists in the pending queue for the given certificate ID.
-        let exists = self.pending.get_peers(certificate.id()).unwrap_or_default().contains(&peer_ip);
-        // If the peer IP exists, finish the pending request.
-        if exists {
-            // TODO: Validate the certificate.
-            // Remove the certificate ID from the pending queue.
-            self.pending.remove(certificate.id(), Some(certificate));
-        }
     }
 }
 

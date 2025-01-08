@@ -31,7 +31,6 @@ use crate::{
         assign_to_worker,
         assign_to_workers,
         fmt_id,
-        init_sync_channels,
         now,
     },
     spawn_blocking,
@@ -40,10 +39,7 @@ use snarkos_account::Account;
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_sync::DUMMY_SELF_IP;
 use snarkvm::{
-    console::{
-        prelude::*,
-        types::{Address, Field},
-    },
+    console::{prelude::*, types::Address},
     ledger::{
         block::Transaction,
         narwhal::{BatchCertificate, BatchHeader, Data, Transmission, TransmissionID},
@@ -54,7 +50,7 @@ use snarkvm::{
 
 use colored::Colorize;
 use futures::stream::{FuturesUnordered, StreamExt};
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use parking_lot::{Mutex, RwLock};
 
 // AlexZ: Needed for Validator to forge signatures.
@@ -205,14 +201,12 @@ impl<N: Network> Primary<N> {
         // Set the workers.
         self.workers = Arc::from(workers);
 
-        // First, initialize the sync channels.
-        let (_, sync_receiver) = init_sync_channels();
         // Next, initialize the sync module and sync the storage from ledger.
         self.sync.initialize(bft_sender).await?;
         // Next, load and process the proposal cache before running the sync module.
         self.load_proposal_cache().await?;
         // Next, run the sync module.
-        self.sync.run(sync_receiver).await?;
+        self.sync.run().await?;
         // Lastly, start the primary handlers.
         // Note: This ensures the primary does not start communicating before syncing is complete.
         self.start_handlers(primary_receiver);
