@@ -224,10 +224,10 @@ impl<N: Network> Sync<N> {
         let _lock = self.response_lock.lock().await;
 
         // Retrieve the latest block height.
-        let mut current_height = self.ledger.latest_block_height() + 1;
+        let current_height = self.ledger.latest_block_height() + 1;
 
         // Retrieve the maximum block height of the peers.
-        let tip = self.block_sync.find_sync_peers().map(|(x, _)| x.into_values().max().unwrap_or(0)).unwrap_or(0);
+        let tip = 0u32;
         // Determine the number of maximum number of blocks that would have been garbage collected.
         let max_gc_blocks = u32::try_from(self.storage.max_gc_rounds())?.saturating_div(2);
         // Determine the maximum height that the peer would have garbage collected.
@@ -235,13 +235,6 @@ impl<N: Network> Sync<N> {
 
         // Determine if we can sync the ledger without updating the BFT first.
         if current_height <= max_gc_height {
-            // Try to advance the ledger *to tip* without updating the BFT.
-            while let Some(block) = self.block_sync.process_next_block(current_height) {
-                info!("Syncing the ledger to block {}...", block.height());
-                self.sync_ledger_with_block_without_bft(block).await?;
-                // Update the current height.
-                current_height += 1;
-            }
             // Sync the storage with the ledger if we should transition to the BFT sync.
             if current_height > max_gc_height {
                 if let Err(e) = self.sync_storage_with_ledger_at_bootup().await {
@@ -250,37 +243,7 @@ impl<N: Network> Sync<N> {
             }
         }
 
-        // Try to advance the ledger with sync blocks.
-        while let Some(block) = self.block_sync.process_next_block(current_height) {
-            info!("Syncing the BFT to block {}...", block.height());
-            // Sync the storage with the block.
-            self.sync_storage_with_block(block).await?;
-            // Update the current height.
-            current_height += 1;
-        }
         Ok(())
-    }
-
-    /// Syncs the ledger with the given block without updating the BFT.
-    async fn sync_ledger_with_block_without_bft(&self, block: Block<N>) -> Result<()> {
-        // Acquire the sync lock.
-        let _lock = self.sync_lock.lock().await;
-
-        let self_ = self.clone();
-        tokio::task::spawn_blocking(move || {
-            // Check the next block.
-            self_.ledger.check_next_block(&block)?;
-            // Attempt to advance to the next block.
-            self_.ledger.advance_to_next_block(&block)?;
-
-            // Sync the height with the block.
-            self_.storage.sync_height_with_block(block.height());
-            // Sync the round with the block.
-            self_.storage.sync_round_with_block(block.round());
-
-            Ok(())
-        })
-        .await?
     }
 
     /// Syncs the storage with the given blocks.
@@ -480,13 +443,6 @@ impl<N: Network> Sync<N> {
     /// Returns the current block locators of the node.
     pub fn get_block_locators(&self) -> Result<BlockLocators<N>> {
         self.block_sync.get_block_locators()
-    }
-
-    /// Returns the block sync module.
-    #[cfg(test)]
-    #[doc(hidden)]
-    pub(super) fn block_sync(&self) -> &BlockSync<N> {
-        &self.block_sync
     }
 }
 

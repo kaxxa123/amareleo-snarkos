@@ -22,7 +22,6 @@ use snarkos_node_router::messages::{
     MessageCodec,
     Ping,
     Pong,
-    PuzzleRequest,
     UnconfirmedTransaction,
 };
 use snarkos_node_tcp::{Connection, ConnectionSide, Tcp};
@@ -122,16 +121,7 @@ impl<N: Network, C: ConsensusStorage<N>> Routing<N> for Prover<N, C> {}
 
 impl<N: Network, C: ConsensusStorage<N>> Heartbeat<N> for Prover<N, C> {
     /// This function updates the puzzle if network has updated.
-    fn handle_puzzle_request(&self) {
-        // Find the sync peers.
-        if let Some((sync_peers, _)) = self.sync.find_sync_peers() {
-            // Choose the peer with the highest block height.
-            if let Some((peer_ip, _)) = sync_peers.into_iter().max_by_key(|(_, height)| *height) {
-                // Request the puzzle from the peer.
-                Outbound::send(self, peer_ip, Message::PuzzleRequest(PuzzleRequest));
-            }
-        }
-    }
+    fn handle_puzzle_request(&self) {}
 }
 
 impl<N: Network, C: ConsensusStorage<N>> Outbound<N> for Prover<N, C> {
