@@ -14,7 +14,6 @@
 // limitations under the License.
 
 use crate::{
-    Gateway,
     MAX_BATCH_DELAY_IN_MS,
     MAX_WORKERS,
     MIN_BATCH_DELAY_IN_SECS,
@@ -108,14 +107,12 @@ impl<N: Network> Primary<N> {
         account: Account<N>,
         storage: Storage<N>,
         ledger: Arc<dyn LedgerService<N>>,
-        ip: Option<SocketAddr>,
-        trusted_validators: &[SocketAddr],
-        dev: Option<u16>,
+        _ip: Option<SocketAddr>,
+        _trusted_validators: &[SocketAddr],
+        _dev: Option<u16>,
     ) -> Result<Self> {
-        // Initialize the gateway.
-        let gateway = Gateway::new(account.clone(), storage.clone(), ledger.clone(), ip, trusted_validators, dev)?;
         // Initialize the sync module.
-        let sync = Sync::new(gateway.clone(), storage.clone(), ledger.clone());
+        let sync = Sync::new(storage.clone(), ledger.clone());
 
         // Initialize the primary instance.
         Ok(Self {

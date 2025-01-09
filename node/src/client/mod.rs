@@ -172,7 +172,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
         .await?;
 
         // Initialize the sync module.
-        let sync = BlockSync::new(BlockSyncMode::Router, ledger_service.clone(), router.tcp().clone());
+        let sync = BlockSync::new(BlockSyncMode::Router, ledger_service.clone());
 
         // Initialize the node.
         let mut node = Self {
@@ -241,7 +241,7 @@ impl<N: Network, C: ConsensusStorage<N>> Client<N, C> {
                 // Sleep briefly to avoid triggering spam detection.
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 // Perform the sync routine.
-                node.sync.try_block_sync(&node).await;
+                node.sync.try_block_sync().await;
             }
         }));
     }

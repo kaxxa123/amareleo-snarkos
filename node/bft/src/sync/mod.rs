@@ -14,7 +14,6 @@
 // limitations under the License.
 
 use crate::{
-    Gateway,
     MAX_FETCH_TIMEOUT_IN_MS,
     PRIMARY_PING_IN_MS,
     helpers::{BFTSender, Pending, Storage},
@@ -22,7 +21,6 @@ use crate::{
 };
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_sync::{BlockSync, BlockSyncMode, locators::BlockLocators};
-use snarkos_node_tcp::P2P;
 use snarkvm::{
     console::{network::Network, types::Field},
     ledger::{authority::Authority, block::Block, narwhal::BatchCertificate},
@@ -40,8 +38,6 @@ use tokio::{
 
 #[derive(Clone)]
 pub struct Sync<N: Network> {
-    /// The gateway.
-    gateway: Gateway<N>,
     /// The storage.
     storage: Storage<N>,
     /// The ledger service.
@@ -64,12 +60,11 @@ pub struct Sync<N: Network> {
 
 impl<N: Network> Sync<N> {
     /// Initializes a new sync instance.
-    pub fn new(gateway: Gateway<N>, storage: Storage<N>, ledger: Arc<dyn LedgerService<N>>) -> Self {
+    pub fn new(storage: Storage<N>, ledger: Arc<dyn LedgerService<N>>) -> Self {
         // Initialize the block sync module.
-        let block_sync = BlockSync::new(BlockSyncMode::Gateway, ledger.clone(), gateway.tcp().clone());
+        let block_sync = BlockSync::new(BlockSyncMode::Gateway, ledger.clone());
         // Return the sync instance.
         Self {
-            gateway,
             storage,
             ledger,
             block_sync,
@@ -110,10 +105,9 @@ impl<N: Network> Sync<N> {
             loop {
                 // Sleep briefly to avoid triggering spam detection.
                 tokio::time::sleep(Duration::from_millis(PRIMARY_PING_IN_MS)).await;
-                // Perform the sync routine.
-                let communication = &self_.gateway;
+
                 // let communication = &node.router;
-                self_.block_sync.try_block_sync(communication).await;
+                self_.block_sync.try_block_sync().await;
 
                 // Sync the storage with the blocks.
                 if let Err(e) = self_.sync_storage_with_blocks().await {
@@ -745,10 +739,8 @@ mod tests {
             CurrentLedger::load(genesis, StorageMode::Production).unwrap(),
             Default::default(),
         ));
-        // Initialize the gateway.
-        let gateway = Gateway::new(account.clone(), storage.clone(), syncing_ledger.clone(), None, &[], None)?;
         // Initialize the sync module.
-        let sync = Sync::new(gateway.clone(), storage.clone(), syncing_ledger.clone());
+        let sync = Sync::new(storage.clone(), syncing_ledger.clone());
         // Try to sync block 1.
         sync.sync_storage_with_block(block_1).await?;
         assert_eq!(syncing_ledger.latest_block_height(), 1);

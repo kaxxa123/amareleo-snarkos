@@ -132,7 +132,7 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         .await?;
 
         // Initialize the sync module.
-        let sync = BlockSync::new(BlockSyncMode::Gateway, ledger_service, router.tcp().clone());
+        let sync = BlockSync::new(BlockSyncMode::Gateway, ledger_service);
 
         // Initialize the node.
         let mut node = Self {
