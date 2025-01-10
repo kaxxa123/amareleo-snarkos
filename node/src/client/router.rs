@@ -199,7 +199,7 @@ impl<N: Network, C: ConsensusStorage<N>> Outbound<N> for Client<N, C> {
 
     /// Returns the number of blocks this node is behind the greatest peer height.
     fn num_blocks_behind(&self) -> u32 {
-        self.sync.num_blocks_behind()
+        0u32
     }
 }
 
@@ -223,15 +223,11 @@ impl<N: Network, C: ConsensusStorage<N>> Inbound<N> for Client<N, C> {
     }
 
     /// Handles a `BlockResponse` message.
-    fn block_response(&self, peer_ip: SocketAddr, blocks: Vec<Block<N>>) -> bool {
-        // Tries to advance with blocks from the sync module.
-        match self.sync.advance_with_sync_blocks(peer_ip, blocks) {
-            Ok(()) => true,
-            Err(error) => {
-                warn!("{error}");
-                false
-            }
+    fn block_response(&self, _peer_ip: SocketAddr, blocks: Vec<Block<N>>) -> bool {
+        if !blocks.is_empty() {
+            warn!("The sync pool did not request any blocks");
         }
+        blocks.is_empty()
     }
 
     /// Processes the block locators and sends back a `Pong` message.

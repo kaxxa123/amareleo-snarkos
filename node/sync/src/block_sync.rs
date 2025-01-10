@@ -16,17 +16,17 @@
 use crate::{helpers::PeerPair, locators::BlockLocators};
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_sync_locators::{CHECKPOINT_INTERVAL, NUM_RECENT_BLOCKS};
-use snarkvm::prelude::{Network, block::Block};
+use snarkvm::prelude::Network;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use indexmap::IndexMap;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
 };
 
@@ -61,14 +61,6 @@ impl BlockSyncMode {
 }
 
 /// A struct that keeps track of the current block sync state.
-///
-/// # State
-/// - When a request is inserted, the `requests` map and `request_timestamps` map insert an entry for the request height.
-/// - When a response is inserted, the `requests` map inserts the entry for the request height.
-/// - When a request is completed, the `requests` map still has the entry, but its `sync_ips` is empty;
-///   the `request_timestamps` map remains unchanged.
-/// - When a response is removed/completed, the `requests` map and `request_timestamps` map also remove the entry for the request height.
-/// - When a request is timed out, the `requests`, `request_timestamps`, and `responses` map remove the entry for the request height;
 #[derive(Clone, Debug)]
 pub struct BlockSync<N: Network> {
     /// The block sync mode.
@@ -85,10 +77,6 @@ pub struct BlockSync<N: Network> {
     common_ancestors: Arc<RwLock<IndexMap<PeerPair, u32>>>,
     /// The boolean indicator of whether the node is synced up to the latest block (within the given tolerance).
     is_block_synced: Arc<AtomicBool>,
-    /// The number of blocks the peer is behind the greatest peer height.
-    num_blocks_behind: Arc<AtomicU32>,
-    /// The lock to guarantee advance_with_sync_blocks() is called only once at a time.
-    advance_with_sync_blocks_lock: Arc<Mutex<()>>,
 }
 
 impl<N: Network> BlockSync<N> {
@@ -100,8 +88,6 @@ impl<N: Network> BlockSync<N> {
             locators: Default::default(),
             common_ancestors: Default::default(),
             is_block_synced: Default::default(),
-            num_blocks_behind: Default::default(),
-            advance_with_sync_blocks_lock: Default::default(),
         }
     }
 
@@ -115,12 +101,6 @@ impl<N: Network> BlockSync<N> {
     #[inline]
     pub fn is_block_synced(&self) -> bool {
         self.is_block_synced.load(Ordering::SeqCst)
-    }
-
-    /// Returns the number of blocks the node is behind the greatest peer height.
-    #[inline]
-    pub fn num_blocks_behind(&self) -> u32 {
-        self.num_blocks_behind.load(Ordering::SeqCst)
     }
 }
 
@@ -165,34 +145,12 @@ impl<N: Network> BlockSync<N> {
     /// Performs one iteration of the block sync.
     #[inline]
     pub async fn try_block_sync(&self) {
-        // Update the state of `is_block_synced` for the sync module.
-        self.update_is_block_synced(0, MAX_BLOCKS_BEHIND);
-    }
+        // Update the sync status.
+        self.is_block_synced.store(true, Ordering::SeqCst);
 
-    /// Processes the block response from the given peer IP.
-    #[inline]
-    pub fn process_block_response(&self, _peer_ip: SocketAddr, blocks: Vec<Block<N>>) -> Result<()> {
-        // Insert the candidate blocks into the sync pool.
-        if !blocks.is_empty() {
-            bail!("The sync pool did not request any blocks")
-        }
-
-        Ok(())
-    }
-
-    /// Attempts to advance with blocks from the sync pool.
-    #[inline]
-    pub fn advance_with_sync_blocks(&self, peer_ip: SocketAddr, blocks: Vec<Block<N>>) -> Result<()> {
-        // Process the block response from the given peer IP.
-        self.process_block_response(peer_ip, blocks)?;
-
-        // Acquire the lock to ensure this function is called only once at a time.
-        // If the lock is already acquired, return early.
-        let Some(_lock) = self.advance_with_sync_blocks_lock.try_lock() else {
-            trace!("Skipping a call to advance_with_sync_blocks() as it is already in progress");
-            return Ok(());
-        };
-        Ok(())
+        // Update the `IS_SYNCED` metric.
+        #[cfg(feature = "metrics")]
+        metrics::gauge(metrics::bft::IS_SYNCED, true);
     }
 }
 
@@ -256,27 +214,5 @@ impl<N: Network> BlockSync<N> {
     pub fn remove_peer(&self, peer_ip: &SocketAddr) {
         // Remove the locators entry for the given peer IP.
         self.locators.write().remove(peer_ip);
-    }
-}
-
-impl<N: Network> BlockSync<N> {
-    /// Updates the state of `is_block_synced` for the sync module.
-    fn update_is_block_synced(&self, greatest_peer_height: u32, max_blocks_behind: u32) {
-        // Retrieve the latest block height.
-        let canon_height = self.canon.latest_block_height();
-        trace!(
-            "Updating is_block_synced: greatest_peer_height = {greatest_peer_height}, canon_height = {canon_height}"
-        );
-        // Compute the number of blocks that we are behind by.
-        let num_blocks_behind = greatest_peer_height.saturating_sub(canon_height);
-        // Determine if the primary is synced.
-        let is_synced = num_blocks_behind <= max_blocks_behind;
-        // Update the num blocks behind.
-        self.num_blocks_behind.store(num_blocks_behind, Ordering::SeqCst);
-        // Update the sync status.
-        self.is_block_synced.store(is_synced, Ordering::SeqCst);
-        // Update the `IS_SYNCED` metric.
-        #[cfg(feature = "metrics")]
-        metrics::gauge(metrics::bft::IS_SYNCED, is_synced);
     }
 }

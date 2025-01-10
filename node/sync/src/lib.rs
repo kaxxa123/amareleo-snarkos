@@ -15,9 +15,6 @@
 
 #![forbid(unsafe_code)]
 
-#[macro_use]
-extern crate tracing;
-
 pub use snarkos_node_sync_communication_service as communication_service;
 pub use snarkos_node_sync_locators as locators;
 

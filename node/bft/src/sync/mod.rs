@@ -14,15 +14,13 @@
 // limitations under the License.
 
 use crate::{
-    MAX_FETCH_TIMEOUT_IN_MS,
     PRIMARY_PING_IN_MS,
-    helpers::{BFTSender, Pending, Storage},
-    spawn_blocking,
+    helpers::{BFTSender, Storage},
 };
 use snarkos_node_bft_ledger_service::LedgerService;
 use snarkos_node_sync::{BlockSync, BlockSyncMode, locators::BlockLocators};
 use snarkvm::{
-    console::{network::Network, types::Field},
+    console::network::Network,
     ledger::{authority::Authority, block::Block, narwhal::BatchCertificate},
     prelude::{cfg_into_iter, cfg_iter},
 };
@@ -30,7 +28,7 @@ use snarkvm::{
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
 use rayon::prelude::*;
-use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
     sync::{Mutex as TMutex, OnceCell},
     task::JoinHandle,
@@ -44,8 +42,6 @@ pub struct Sync<N: Network> {
     ledger: Arc<dyn LedgerService<N>>,
     /// The block sync module.
     block_sync: BlockSync<N>,
-    /// The pending certificates queue.
-    pending: Arc<Pending<Field<N>, BatchCertificate<N>>>,
     /// The BFT sender.
     bft_sender: Arc<OnceCell<BFTSender<N>>>,
     /// The spawned handles.
@@ -68,7 +64,6 @@ impl<N: Network> Sync<N> {
             storage,
             ledger,
             block_sync,
-            pending: Default::default(),
             bft_sender: Default::default(),
             handles: Default::default(),
             response_lock: Default::default(),
@@ -120,22 +115,6 @@ impl<N: Network> Sync<N> {
                 }
             }
         }));
-
-        // Start the pending queue expiration loop.
-        let self_ = self.clone();
-        self.spawn(async move {
-            loop {
-                // Sleep briefly.
-                tokio::time::sleep(Duration::from_millis(MAX_FETCH_TIMEOUT_IN_MS)).await;
-
-                // Remove the expired pending transmission requests.
-                let self__ = self_.clone();
-                let _ = spawn_blocking!({
-                    self__.pending.clear_expired_callbacks();
-                    Ok(())
-                });
-            }
-        });
 
         Ok(())
     }
@@ -432,7 +411,7 @@ impl<N: Network> Sync<N> {
 
     /// Returns the number of blocks the node is behind the greatest peer height.
     pub fn num_blocks_behind(&self) -> u32 {
-        self.block_sync.num_blocks_behind()
+        0u32
     }
 
     /// Returns `true` if the node is in gateway mode.
@@ -447,11 +426,6 @@ impl<N: Network> Sync<N> {
 }
 
 impl<N: Network> Sync<N> {
-    /// Spawns a task with the given future; it should only be used for long-running tasks.
-    fn spawn<T: Future<Output = ()> + Send + 'static>(&self, future: T) {
-        self.handles.lock().push(tokio::spawn(future));
-    }
-
     /// Shuts down the primary.
     pub async fn shut_down(&self) {
         info!("Shutting down the sync module...");
