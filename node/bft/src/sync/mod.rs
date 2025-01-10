@@ -18,7 +18,7 @@ use crate::{
     helpers::{BFTSender, Storage},
 };
 use snarkos_node_bft_ledger_service::LedgerService;
-use snarkos_node_sync::{BlockSync, BlockSyncMode, locators::BlockLocators};
+use snarkos_node_sync::locators::{BlockLocators, CHECKPOINT_INTERVAL, NUM_RECENT_BLOCKS};
 use snarkvm::{
     console::network::Network,
     ledger::{authority::Authority, block::Block, narwhal::BatchCertificate},
@@ -26,6 +26,7 @@ use snarkvm::{
 };
 
 use anyhow::{Result, bail};
+use indexmap::IndexMap;
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -34,14 +35,14 @@ use tokio::{
     task::JoinHandle,
 };
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 #[derive(Clone)]
 pub struct Sync<N: Network> {
     /// The storage.
     storage: Storage<N>,
     /// The ledger service.
     ledger: Arc<dyn LedgerService<N>>,
-    /// The block sync module.
-    block_sync: BlockSync<N>,
     /// The BFT sender.
     bft_sender: Arc<OnceCell<BFTSender<N>>>,
     /// The spawned handles.
@@ -52,23 +53,23 @@ pub struct Sync<N: Network> {
     sync_lock: Arc<TMutex<()>>,
     /// The latest block responses.
     latest_block_responses: Arc<TMutex<HashMap<u32, Block<N>>>>,
+    /// The boolean indicator of whether the node is synced up to the latest block (within the given tolerance).
+    is_block_synced: Arc<AtomicBool>,
 }
 
 impl<N: Network> Sync<N> {
     /// Initializes a new sync instance.
     pub fn new(storage: Storage<N>, ledger: Arc<dyn LedgerService<N>>) -> Self {
-        // Initialize the block sync module.
-        let block_sync = BlockSync::new(BlockSyncMode::Gateway, ledger.clone());
         // Return the sync instance.
         Self {
             storage,
             ledger,
-            block_sync,
             bft_sender: Default::default(),
             handles: Default::default(),
             response_lock: Default::default(),
             sync_lock: Default::default(),
             latest_block_responses: Default::default(),
+            is_block_synced: Default::default(),
         }
     }
 
@@ -101,8 +102,12 @@ impl<N: Network> Sync<N> {
                 // Sleep briefly to avoid triggering spam detection.
                 tokio::time::sleep(Duration::from_millis(PRIMARY_PING_IN_MS)).await;
 
-                // let communication = &node.router;
-                self_.block_sync.try_block_sync().await;
+                // Update the sync status.
+                self_.is_block_synced.store(true, Ordering::SeqCst);
+
+                // Update the `IS_SYNCED` metric.
+                #[cfg(feature = "metrics")]
+                metrics::gauge(metrics::bft::IS_SYNCED, true);
 
                 // Sync the storage with the blocks.
                 if let Err(e) = self_.sync_storage_with_blocks().await {
@@ -403,10 +408,7 @@ impl<N: Network> Sync<N> {
 impl<N: Network> Sync<N> {
     /// Returns `true` if the node is synced and has connected peers.
     pub fn is_synced(&self) -> bool {
-        // if self.gateway.number_of_connected_peers() == 0 {
-        //     return false;
-        // }
-        self.block_sync.is_block_synced()
+        self.is_block_synced.load(Ordering::SeqCst)
     }
 
     /// Returns the number of blocks the node is behind the greatest peer height.
@@ -416,12 +418,30 @@ impl<N: Network> Sync<N> {
 
     /// Returns `true` if the node is in gateway mode.
     pub const fn is_gateway_mode(&self) -> bool {
-        self.block_sync.mode().is_gateway()
+        true
     }
 
     /// Returns the current block locators of the node.
     pub fn get_block_locators(&self) -> Result<BlockLocators<N>> {
-        self.block_sync.get_block_locators()
+        // Retrieve the latest block height.
+        let latest_height = self.ledger.latest_block_height();
+
+        // Initialize the recents map.
+        let mut recents = IndexMap::with_capacity(NUM_RECENT_BLOCKS);
+        // Retrieve the recent block hashes.
+        for height in latest_height.saturating_sub((NUM_RECENT_BLOCKS - 1) as u32)..=latest_height {
+            recents.insert(height, self.ledger.get_block_hash(height)?);
+        }
+
+        // Initialize the checkpoints map.
+        let mut checkpoints = IndexMap::with_capacity((latest_height / CHECKPOINT_INTERVAL + 1).try_into()?);
+        // Retrieve the checkpoint block hashes.
+        for height in (0..=latest_height).step_by(CHECKPOINT_INTERVAL as usize) {
+            checkpoints.insert(height, self.ledger.get_block_hash(height)?);
+        }
+
+        // Construct the block locators.
+        BlockLocators::new(recents, checkpoints)
     }
 }
 
