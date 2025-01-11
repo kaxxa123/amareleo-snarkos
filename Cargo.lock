@@ -3379,6 +3379,7 @@ dependencies = [
 name = "snarkos-node-bft-ledger-service"
 version = "3.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "indexmap 2.5.0",
  "lru",
@@ -3386,6 +3387,7 @@ dependencies = [
  "rand",
  "snarkos-node-metrics",
  "snarkvm",
+ "time",
  "tokio",
  "tracing",
 ]

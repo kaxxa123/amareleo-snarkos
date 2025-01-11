@@ -17,6 +17,7 @@ use crate::{LedgerService, fmt_id, spawn_blocking};
 use snarkvm::{
     ledger::{
         Ledger,
+        authority::Authority,
         block::{Block, Transaction},
         committee::Committee,
         narwhal::{BatchCertificate, Data, Subdag, Transmission, TransmissionID},
@@ -24,11 +25,14 @@ use snarkvm::{
         store::ConsensusStorage,
     },
     prelude::{Address, Field, FromBytes, Network, Result, bail},
+    synthesizer::program::FinalizeGlobalState,
 };
 
+use anyhow::anyhow;
 use indexmap::IndexMap;
 use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
+use rand::{CryptoRng, Rng};
 use std::{
     fmt,
     io::Read,
@@ -343,7 +347,7 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
 
     /// Checks the given block is valid next block.
     fn check_next_block(&self, block: &Block<N>) -> Result<()> {
-        self.ledger.check_next_block(block, &mut rand::thread_rng())
+        self.check_next_block_internal(block, &mut rand::thread_rng())
     }
 
     /// Returns a candidate for the next block in the ledger, using a committed subdag and its transmissions.
@@ -379,6 +383,198 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
         }
 
         tracing::info!("\n\nAdvanced to block {} at round {} - {}\n", block.height(), block.round(), block.hash());
+        Ok(())
+    }
+}
+
+// AlexZ: snarkvm::Ledger::check_next_block() fails due to our cheat that always sets the same leader.
+// Here I am extracting some of the snarkvm code that allows me to disable this check rather than
+// completely comment out the function.
+//
+// Relevant log dump:
+// DEBUG snarkos_node_bft::primary: Stored a batch certificate for validator/round 2/7
+// DEBUG snarkos_node_bft::primary: Inserted signature to signed_proposals 2/7
+//  INFO snarkos_node_bft::bft: Checking if the leader is ready to be committed for round 6...
+//  INFO snarkos_node_bft::bft: Proceeding to commit round 6 with leader 'aleo1rhgdu77hgyq..'
+//
+// ERROR snarkos_node_consensus: Unable to advance to the next block - Quorum block 1 is authored by an unexpected leader
+//      (found: aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px,
+//      expected: aleo12ux3gdauck0v60westgcpqj7v8rrcr3v346e4jtq04q7kkt22czsh808v2)
+//
+// ERROR snarkos_node_bft::bft: BFT failed to advance the subdag for round 2 - Quorum block 1 is authored by an unexpected
+//      leader (found: aleo1rhgdu77hgyqd3xjj8ucu3jj9r2krwz6mnzyd80gncr5fxcwlh5rsvzp9px,
+//      expected: aleo12ux3gdauck0v60westgcpqj7v8rrcr3v346e4jtq04q7kkt22czsh808v2)
+//
+impl<N: Network, C: ConsensusStorage<N>> CoreLedgerService<N, C> {
+    /// Checks the given block is valid next block.
+    fn check_next_block_internal<R: CryptoRng + Rng>(&self, block: &Block<N>, rng: &mut R) -> Result<()> {
+        let height = block.height();
+
+        // Ensure the block hash does not already exist.
+        if self.ledger.contains_block_hash(&block.hash())? {
+            bail!("Block hash '{}' already exists in the ledger", block.hash())
+        }
+
+        // Ensure the block height does not already exist.
+        if self.ledger.contains_block_height(block.height())? {
+            bail!("Block height '{height}' already exists in the ledger")
+        }
+
+        // Ensure the solutions do not already exist.
+        for solution_id in block.solutions().solution_ids() {
+            if self.ledger.contains_solution_id(solution_id)? {
+                bail!("Solution ID {solution_id} already exists in the ledger");
+            }
+        }
+
+        // Construct the finalize state.
+        let state = FinalizeGlobalState::new::<N>(
+            block.round(),
+            block.height(),
+            block.cumulative_weight(),
+            block.cumulative_proof_target(),
+            block.previous_hash(),
+        )?;
+
+        // Ensure speculation over the unconfirmed transactions is correct and ensure each transaction is well-formed and unique.
+        let time_since_last_block = block.timestamp().saturating_sub(self.ledger.latest_timestamp());
+        let ratified_finalize_operations = self.ledger.vm().check_speculate(
+            state,
+            time_since_last_block,
+            block.ratifications(),
+            block.solutions(),
+            block.transactions(),
+            rng,
+        )?;
+
+        // Retrieve the committee lookback.
+        let committee_lookback = {
+            // Determine the round number for the previous committee. Note, we subtract 2 from odd rounds,
+            // because committees are updated in even rounds.
+            let previous_round = match block.round() % 2 == 0 {
+                true => block.round().saturating_sub(1),
+                false => block.round().saturating_sub(2),
+            };
+            // Determine the committee lookback round.
+            let committee_lookback_round = previous_round.saturating_sub(Committee::<N>::COMMITTEE_LOOKBACK_RANGE);
+            // Output the committee lookback.
+            self.ledger
+                .get_committee_for_round(committee_lookback_round)?
+                .ok_or(anyhow!("Failed to fetch committee for round {committee_lookback_round}"))?
+        };
+
+        // Retrieve the previous committee lookback.
+        let previous_committee_lookback = {
+            // Calculate the penultimate round, which is the round before the anchor round.
+            let penultimate_round = block.round().saturating_sub(1);
+            // Determine the round number for the previous committee. Note, we subtract 2 from odd rounds,
+            // because committees are updated in even rounds.
+            let previous_penultimate_round = match penultimate_round % 2 == 0 {
+                true => penultimate_round.saturating_sub(1),
+                false => penultimate_round.saturating_sub(2),
+            };
+            // Determine the previous committee lookback round.
+            let penultimate_committee_lookback_round =
+                previous_penultimate_round.saturating_sub(Committee::<N>::COMMITTEE_LOOKBACK_RANGE);
+            // Output the previous committee lookback.
+            self.ledger
+                .get_committee_for_round(penultimate_committee_lookback_round)?
+                .ok_or(anyhow!("Failed to fetch committee for round {penultimate_committee_lookback_round}"))?
+        };
+
+        // Ensure the block is correct.
+        let (expected_existing_solution_ids, expected_existing_transaction_ids) = block.verify(
+            &self.ledger.latest_block(),
+            self.ledger.latest_state_root(),
+            &previous_committee_lookback,
+            &committee_lookback,
+            self.ledger.puzzle(),
+            self.ledger.latest_epoch_hash()?,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+            ratified_finalize_operations,
+        )?;
+
+        // Determine if the block subdag is correctly constructed and is not a combination of multiple subdags.
+        self.check_block_subdag_atomicity(block)?;
+
+        // Ensure that each existing solution ID from the block exists in the ledger.
+        for existing_solution_id in expected_existing_solution_ids {
+            if !self.ledger.contains_solution_id(&existing_solution_id)? {
+                bail!("Solution ID '{existing_solution_id}' does not exist in the ledger");
+            }
+        }
+
+        // Ensure that each existing transaction ID from the block exists in the ledger.
+        for existing_transaction_id in expected_existing_transaction_ids {
+            if !self.ledger.contains_transaction_id(&existing_transaction_id)? {
+                bail!("Transaction ID '{existing_transaction_id}' does not exist in the ledger");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Checks that the block subdag can not be split into multiple valid subdags.
+    fn check_block_subdag_atomicity(&self, block: &Block<N>) -> Result<()> {
+        // Returns `true` if there is a path from the previous certificate to the current certificate.
+        fn is_linked<N: Network>(
+            subdag: &Subdag<N>,
+            previous_certificate: &BatchCertificate<N>,
+            current_certificate: &BatchCertificate<N>,
+        ) -> Result<bool> {
+            // Initialize the list containing the traversal.
+            let mut traversal = vec![current_certificate];
+            // Iterate over the rounds from the current certificate to the previous certificate.
+            for round in (previous_certificate.round()..current_certificate.round()).rev() {
+                // Retrieve all of the certificates for this past round.
+                let certificates = subdag.get(&round).ok_or(anyhow!("No certificates found for round {round}"))?;
+                // Filter the certificates to only include those that are in the traversal.
+                traversal = certificates
+                    .into_iter()
+                    .filter(|p| traversal.iter().any(|c| c.previous_certificate_ids().contains(&p.id())))
+                    .collect();
+            }
+            Ok(traversal.contains(&previous_certificate))
+        }
+
+        // Check if the block has a subdag.
+        let subdag = match block.authority() {
+            Authority::Quorum(subdag) => subdag,
+            _ => return Ok(()),
+        };
+
+        // Iterate over the rounds to find possible leader certificates.
+        for round in
+            (self.ledger.latest_round().saturating_add(2)..=subdag.anchor_round().saturating_sub(2)).rev().step_by(2)
+        {
+            // Retrieve the previous committee lookback.
+            let previous_committee_lookback = self
+                .ledger
+                .get_committee_lookback_for_round(round)?
+                .ok_or_else(|| anyhow!("No committee lookback found for round {round}"))?;
+
+            // Compute the leader for the commit round.
+            let computed_leader = previous_committee_lookback
+                .get_leader(round)
+                .map_err(|e| anyhow!("Failed to compute leader for round {round}: {e}"))?;
+
+            // Retrieve the previous leader certificates.
+            let previous_certificate = match subdag.get(&round).and_then(|certificates| {
+                certificates.iter().find(|certificate| certificate.author() == computed_leader)
+            }) {
+                Some(cert) => cert,
+                None => continue,
+            };
+
+            // Determine if there is a path between the previous certificate and the subdag's leader certificate.
+            if is_linked(subdag, previous_certificate, subdag.leader_certificate())? {
+                bail!(
+                    "The previous certificate should not be linked to the current certificate in block {}",
+                    block.height()
+                );
+            }
+        }
+
         Ok(())
     }
 }
